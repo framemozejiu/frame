@@ -291,6 +291,12 @@ local Config = {
     -- bisa merugikan.
     AutoGem   = pilihSaklar("AutoGem", true),
 
+    -- ==== LAYAR HITAM ====
+    -- Default MATI. Beda dari kaitun utama yang layarnya permanen sampai UI
+    -- Roblox ikut hilang, di sini ia cuma ScreenGui yang di-Enabled -- mematikan
+    -- tombolnya mengembalikan tampilan game seketika, tanpa rejoin.
+    LayarHitam = pilihSaklar("LayarHitam", false),
+
     -- ==== LAPORAN DISCORD ====
     -- PERINGATAN: URL ini adalah KREDENSIAL. Siapa pun yang membacanya bisa
     -- mengirim apa saja ke kanalmu. Script ini terbit di repo publik, jadi
@@ -361,6 +367,7 @@ local function tulisSimpanan()
             BoostFps   = Config.BoostFps,
             SaranKolam = Config.SaranKolam,
             AutoKlaim  = Config.AutoKlaim,
+            LayarHitam = Config.LayarHitam,
             KlaimHarian = Config.KlaimHarian,
         }))
     end)
@@ -640,6 +647,429 @@ end
 -- terpisah sebagai kelas prioritas, bukan lewat skor.
 
 
+
+-- =========================================================================
+-- LAYAR HITAM (BLACKSCREEN)
+--
+-- BEDA PENTING DARI KAITUN UTAMA: di sana layar hitamnya PERMANEN dan bahkan
+-- menghapus UI Roblox -- sekali menyala, tidak ada jalan kembali tanpa rejoin.
+-- Di sini TIDAK. Semuanya cuma satu ScreenGui yang di-Enabled/disable, jadi
+-- mematikannya mengembalikan tampilan game apa adanya seketika, dan melepas
+-- script ikut menghapusnya.
+--
+-- Teks "Caught ..." DICERMINKAN, bukan dibiarkan menembus. Notifikasinya dibuat
+-- dinamis sebagai MainGui.NotificationGUI.Notification_NNNN, jadi membiarkannya
+-- tembus berarti membuka seluruh MainGui ikut terlihat.
+local Layar = {
+    sg = nil, ada = false, terlihat = false,
+    baris = {}, kartu = {}, terbaik = {},
+    labelStat = {}, tabel = nil, conn = {},
+}
+
+local FJ_KIRI  = "rbxassetid://79880397850563"
+local FJ_KANAN = "rbxassetid://104624206636533"
+
+-- Upgrade yang ditampilkan, berurutan. Kode aslinya (T1O1 dst) tidak berarti
+-- apa-apa bagi pemakai, jadi labelnya diambil dari Constants saat jalan.
+local URUT_UPGRADE = { "T3O3", "T1O1", "T1O2", "T5O2", "T5O1" }
+
+local function angkaPendek(n)
+    n = tonumber(n) or 0
+    for _, s in ipairs({ { 1e12, "T" }, { 1e9, "B" }, { 1e6, "M" }, { 1e3, "K" } }) do
+        if n >= s[1] then return string.format("%.2f%s", n / s[1], s[2]) end
+    end
+    return string.format("%d", n)
+end
+
+local function buatLayar()
+    if Layar.ada then return end
+    local induk = (type(gethui) == "function" and gethui()) or game:GetService("CoreGui")
+    local lama = induk:FindFirstChild("MozeLayar")
+    if lama then lama:Destroy() end
+
+    local sg = Instance.new("ScreenGui")
+    sg.Name = "MozeLayar"
+    sg.IgnoreGuiInset = true
+    sg.ResetOnSpawn = false
+    -- Di BAWAH panel kendali (DisplayOrder 9999) supaya tombolnya tetap bisa
+    -- diklik saat layar menyala.
+    sg.DisplayOrder = 1000
+    sg.Enabled = false
+    sg.Parent = induk
+    Layar.sg = sg
+
+    local bg = Instance.new("Frame")
+    bg.Size = UDim2.fromScale(1, 1)
+    bg.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    bg.BorderSizePixel = 0
+    bg.Parent = sg
+
+    local function gambar(id, kiri)
+        local im = Instance.new("ImageLabel")
+        im.Size = UDim2.new(0.22, 0, 0.535, 0)
+        im.Position = UDim2.new(kiri and 0.02 or 0.98, 0, 0.5, 0)
+        im.AnchorPoint = Vector2.new(kiri and 0 or 1, 0.5)
+        im.BackgroundTransparency = 1
+        im.ScaleType = Enum.ScaleType.Fit
+        im.ImageTransparency = 0.12
+        im.Image = id
+        im.Parent = bg
+    end
+    gambar(FJ_KIRI, true)
+    gambar(FJ_KANAN, false)
+
+    local judul = Instance.new("TextLabel")
+    judul.Size = UDim2.new(0.6, 0, 0, 40)
+    judul.Position = UDim2.new(0.5, 0, 0, 18)
+    judul.AnchorPoint = Vector2.new(0.5, 0)
+    judul.BackgroundTransparency = 1
+    judul.Font = Enum.Font.GothamBold
+    judul.TextSize = 40
+    judul.TextColor3 = Color3.fromRGB(232, 180, 74)
+    judul.Text = "FAAR - MOZEFRAME"
+    judul.Parent = bg
+
+    -- ---- STAT ----
+    local barisStat = Instance.new("Frame")
+    barisStat.Size = UDim2.new(0, 780, 0, 40)
+    barisStat.Position = UDim2.new(0.5, 0, 0, 62)
+    barisStat.AnchorPoint = Vector2.new(0.5, 0)
+    barisStat.BackgroundTransparency = 1
+    barisStat.Parent = bg
+    local tata = Instance.new("UIListLayout")
+    tata.FillDirection = Enum.FillDirection.Horizontal
+    tata.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    tata.VerticalAlignment = Enum.VerticalAlignment.Center
+    tata.Padding = UDim.new(0, 30)
+    tata.Parent = barisStat
+    for _, s in ipairs({ { "Cash", Color3.fromRGB(240, 210, 110) },
+                          { "Food", Color3.fromRGB(150, 230, 140) },
+                          { "Gems", Color3.fromRGB(120, 210, 255) } }) do
+        local l = Instance.new("TextLabel")
+        l.Name = s[1]
+        l.Size = UDim2.fromOffset(230, 36)
+        l.BackgroundTransparency = 1
+        l.Font = Enum.Font.GothamBold
+        l.TextSize = 24
+        l.TextColor3 = s[2]
+        l.Text = s[1] .. " -"
+        l.Parent = barisStat
+        Layar.labelStat[s[1]] = l
+    end
+
+    -- ---- UPGRADE ----
+    -- Teks polos, TANPA garis kotak. Percobaan pertama memakai karakter kotak
+    -- Unicode di font Code dan hasilnya garis patah-patah yang tidak pernah
+    -- lurus -- Roblox tidak merender glif itu selebar karakter biasa.
+    local kepalaUpg = Instance.new("TextLabel")
+    kepalaUpg.Size = UDim2.new(0, 320, 0, 24)
+    kepalaUpg.Position = UDim2.new(0.5, 0, 0, 106)
+    kepalaUpg.AnchorPoint = Vector2.new(0.5, 0)
+    kepalaUpg.BackgroundTransparency = 1
+    kepalaUpg.Font = Enum.Font.GothamBold
+    kepalaUpg.TextSize = 24
+    kepalaUpg.TextColor3 = Color3.fromRGB(232, 180, 74)
+    kepalaUpg.Text = "Upgrade :"
+    kepalaUpg.Parent = bg
+
+    local tabel = Instance.new("TextLabel")
+    tabel.Name = "Tabel"
+    tabel.Size = UDim2.new(0, 560, 0, 220)
+    tabel.Position = UDim2.new(0.5, 0, 0, 134)
+    tabel.AnchorPoint = Vector2.new(0.5, 0)
+    tabel.BackgroundTransparency = 1
+    tabel.Font = Enum.Font.Gotham
+    tabel.TextSize = 22
+    tabel.LineHeight = 1.4
+    tabel.TextColor3 = Color3.fromRGB(226, 226, 232)
+    tabel.TextXAlignment = Enum.TextXAlignment.Center
+    tabel.TextYAlignment = Enum.TextYAlignment.Top
+    tabel.RichText = true
+    tabel.Text = "memuat..."
+    tabel.Parent = bg
+    Layar.tabel = tabel
+
+    -- ---- FEED "Caught ..." (DI TENGAH) ----
+    -- 16 baris, bukan 8: feed pendek habis dalam belasan detik saat multi-hook,
+    -- dan yang menarik justru barisan panjangnya.
+    local feed = Instance.new("Frame")
+    feed.Size = UDim2.new(0, 620, 0, 430)
+    feed.Position = UDim2.new(0.5, 0, 0, 412)
+    feed.AnchorPoint = Vector2.new(0.5, 0)
+    feed.BackgroundTransparency = 1
+    feed.Parent = bg
+    local tataFeed = Instance.new("UIListLayout")
+    tataFeed.SortOrder = Enum.SortOrder.LayoutOrder
+    tataFeed.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    tataFeed.Padding = UDim.new(0, 3)
+    tataFeed.Parent = feed
+    for i = 1, 16 do
+        local l = Instance.new("TextLabel")
+        l.LayoutOrder = i
+        l.Size = UDim2.new(1, 0, 0, 25)
+        l.BackgroundTransparency = 1
+        l.Font = Enum.Font.Gotham
+        l.TextSize = 21
+        l.RichText = true
+        l.TextXAlignment = Enum.TextXAlignment.Center
+        l.TextColor3 = Color3.fromRGB(210, 210, 218)
+        l.Text = ""
+        l.Parent = feed
+        Layar.baris[i] = l
+    end
+
+    -- ---- BEST CATCH ----
+    local judulBest = Instance.new("TextLabel")
+    judulBest.Size = UDim2.new(0, 300, 0, 24)
+    judulBest.Position = UDim2.new(0, 40, 1, -286)
+    judulBest.BackgroundTransparency = 1
+    judulBest.Font = Enum.Font.GothamBold
+    judulBest.TextSize = 21
+    judulBest.TextXAlignment = Enum.TextXAlignment.Left
+    judulBest.TextColor3 = Color3.fromRGB(232, 180, 74)
+    judulBest.Text = "BEST CATCH"
+    judulBest.Parent = bg
+
+    for i = 1, 5 do
+        local kartu = Instance.new("Frame")
+        kartu.Size = UDim2.fromOffset(172, 236)
+        kartu.Position = UDim2.new(0, 40 + (i - 1) * 186, 1, -256)
+        kartu.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
+        kartu.BorderSizePixel = 0
+        kartu.Parent = bg
+        Instance.new("UICorner", kartu).CornerRadius = UDim.new(0, 8)
+        local garis = Instance.new("UIStroke")
+        garis.Color = Color3.fromRGB(70, 70, 84)
+        garis.Thickness = 1
+        garis.Parent = kartu
+
+        -- ViewportFrame, BUKAN ImageLabel: game ini tidak punya art 2D karakter,
+        -- dan Roblox tidak bisa memuat gambar dari URL luar. Merender model
+        -- aslinya satu-satunya cara menampilkan wajahnya di dalam game.
+        local vp = Instance.new("ViewportFrame")
+        vp.Name = "VP"
+        vp.Size = UDim2.new(1, -14, 0, 130)
+        vp.Position = UDim2.fromOffset(7, 7)
+        vp.BackgroundColor3 = Color3.fromRGB(14, 14, 18)
+        vp.BorderSizePixel = 0
+        vp.Ambient = Color3.fromRGB(205, 205, 215)
+        vp.LightColor = Color3.fromRGB(255, 250, 240)
+        vp.LightDirection = Vector3.new(-0.35, -0.75, -0.55)
+        vp.Parent = kartu
+        Instance.new("UICorner", vp).CornerRadius = UDim.new(0, 6)
+
+        local function label(nama, y, ukuran, warna, tebal)
+            local l = Instance.new("TextLabel")
+            l.Name = nama
+            l.Size = UDim2.new(1, -14, 0, 22)
+            l.Position = UDim2.fromOffset(7, y)
+            l.BackgroundTransparency = 1
+            l.Font = tebal and Enum.Font.GothamBold or Enum.Font.Gotham
+            l.TextSize = ukuran
+            l.TextTruncate = Enum.TextTruncate.AtEnd
+            l.TextColor3 = warna
+            l.Text = ""
+            l.Parent = kartu
+            return l
+        end
+        label("Nama",   142, 17, Color3.fromRGB(235, 235, 240), true)
+        label("Rarity", 166, 14, Color3.fromRGB(150, 150, 162))
+        label("Mutasi", 187, 14, Color3.fromRGB(200, 150, 255))
+        label("Cps",    208, 14, Color3.fromRGB(240, 210, 110))
+        Layar.kartu[i] = kartu
+    end
+
+    -- ---- TANDA ----
+    -- Ditaruh di ruang kosong antara feed dan kartu, bukan di dasar layar:
+    -- kartu Best Catch sudah memenuhi bagian bawah kiri, dan menaruhnya di sana
+    -- membuat keduanya bertindih di layar lebar.
+    local tanda = Instance.new("TextLabel")
+    tanda.Size = UDim2.new(0, 1400, 0, 110)
+    tanda.Position = UDim2.new(0.5, 0, 0.78, 0)
+    tanda.AnchorPoint = Vector2.new(0.5, 0.5)
+    tanda.BackgroundTransparency = 1
+    tanda.Font = Enum.Font.Code
+    tanda.TextSize = 84
+    tanda.TextColor3 = Color3.fromRGB(255, 255, 255)
+    tanda.Text = "FENG JIU MY BINI"
+    tanda.Parent = bg
+
+    Layar.ada = true
+end
+
+-- ---- POTRET KARTU ----
+local function pasangPotret(kartu, rarity, nama)
+    local vp = kartu:FindFirstChild("VP")
+    if not vp then return false end
+    for _, c in ipairs(vp:GetChildren()) do
+        if not c:IsA("Camera") then c:Destroy() end
+    end
+    local berhasil = false
+    pcall(function()
+        local A = game:GetService("ReplicatedStorage").Assets.Characters
+        local folder = A:FindFirstChild(rarity)
+        local model = folder and folder:FindFirstChild(nama)
+        if not model then return end
+        local klon = model:Clone()
+        for _, d in ipairs(klon:GetDescendants()) do
+            if d:IsA("BasePart") then d.Anchored = true end
+        end
+        klon.Parent = vp
+        local kepala = klon:FindFirstChild("Head")
+        if not kepala then return end
+        local cam = vp.CurrentCamera
+        if not cam then
+            cam = Instance.new("Camera")
+            cam.Parent = vp
+            vp.CurrentCamera = cam
+        end
+        cam.FieldOfView = 40
+        -- Dibidik ke part Head dari arah hadapnya. Bidikan berbasis bounding box
+        -- selalu mendarat di senjata atau sayap, bukan wajah.
+        local jarak = 3.2 / (2 * math.tan(math.rad(cam.FieldOfView / 2)))
+        local sasaran = kepala.Position - Vector3.new(0, kepala.Size.Y * 0.15, 0)
+        cam.CFrame = CFrame.new(sasaran + kepala.CFrame.LookVector * jarak, sasaran)
+        berhasil = true
+    end)
+    return berhasil
+end
+
+local function segarkanBest()
+    if not Layar.ada then return end
+    for i = 1, 5 do
+        local kartu = Layar.kartu[i]
+        local e = Layar.terbaik[i]
+        if e then
+            kartu.Nama.Text = e.nama
+            kartu.Rarity.Text = e.rarity
+            kartu.Mutasi.Text = (e.mutasi ~= "" and e.mutasi) or "-"
+            kartu.Cps.Text = "$" .. angkaPendek(e.cps) .. "/s"
+            if not e.terpasang then
+                e.terpasang = pasangPotret(kartu, e.rarity, e.nama)
+            end
+        else
+            kartu.Nama.Text = "-"
+            kartu.Rarity.Text = ""
+            kartu.Mutasi.Text = ""
+            kartu.Cps.Text = ""
+        end
+    end
+end
+
+-- Menawarkan satu tangkapan ke papan Best Catch.
+--
+-- Peringkatnya dinaikkan kalau punya mutasi: karakter bermutasi jauh lebih
+-- berharga daripada yang polos di rarity yang sama, jadi papan yang mengabaikan
+-- mutasi akan memajang yang salah. Nama yang sama boleh masuk dua kali kalau
+-- mutasinya berbeda -- itu memang tangkapan yang berbeda.
+function Layar.tawarkan(nama, rarity, peringkat, mutasi, cps)
+    if not nama or not peringkat then return end
+    mutasi = tostring(mutasi or "")
+    local kunci = nama .. "|" .. mutasi
+    for _, e in ipairs(Layar.terbaik) do
+        if e.kunci == kunci then return end
+    end
+    local nilai = peringkat + (mutasi ~= "" and 0.5 or 0)
+    table.insert(Layar.terbaik, {
+        kunci = kunci, nama = nama, rarity = rarity,
+        mutasi = mutasi, cps = tonumber(cps) or 0, nilai = nilai,
+    })
+    table.sort(Layar.terbaik, function(a, b)
+        if a.nilai ~= b.nilai then return a.nilai > b.nilai end
+        return a.cps > b.cps
+    end)
+    while #Layar.terbaik > 5 do table.remove(Layar.terbaik) end
+    segarkanBest()
+end
+
+function Layar.catatTangkapan(teks)
+    if not Layar.ada then return end
+    for i = #Layar.baris, 2, -1 do
+        Layar.baris[i].Text = Layar.baris[i - 1].Text
+    end
+    Layar.baris[1].Text = teks
+end
+
+local function segarkanStat()
+    local LP = game:GetService("Players").LocalPlayer
+    local s = Layar.labelStat
+    if s.Cash then s.Cash.Text = "Cash  $" .. angkaPendek(LP:GetAttribute("CashNumber")) end
+    if s.Food then s.Food.Text = "Food  " .. angkaPendek(LP:GetAttribute("FoodNumber")) end
+    if s.Gems then s.Gems.Text = "Gems  " .. angkaPendek(LP:GetAttribute("GemsNumber")) end
+end
+
+local function segarkanUpgrade()
+    local ok, teks = pcall(function()
+        local RS = game:GetService("ReplicatedStorage")
+        local C = require(RS.Constants)
+        local st = RS.Remotes.UpgradesStoreGetState:InvokeServer()
+        local level = (st and st.levels) or {}
+        local O = C.UpgradesStore.Offers
+        local baris = {}
+        for _, kode in ipairs(URUT_UPGRADE) do
+            local cfg = O[kode]
+            if cfg then
+                local lv = tonumber(level[kode]) or 0
+                local mx = tonumber(cfg.MaxLevels) or 0
+                -- Yang sudah mentok diberi warna berbeda supaya sekilas terlihat
+                -- mana yang masih perlu diurus.
+                local warna = (lv >= mx and mx > 0) and "rgb(120,220,150)" or "rgb(226,226,232)"
+                baris[#baris + 1] = string.format(
+                    "%s  <font color=\"%s\"><b>%d</b> : %d</font>",
+                    tostring(cfg.Label or kode), warna, lv, mx)
+            end
+        end
+        return table.concat(baris, "\n")
+    end)
+    if ok and teks and Layar.tabel then Layar.tabel.Text = teks end
+end
+
+function Layar.tampil(nyala)
+    if not Layar.ada then buatLayar() end
+    Layar.terlihat = nyala and true or false
+    if Layar.sg then Layar.sg.Enabled = Layar.terlihat end
+    if Layar.terlihat then
+        pcall(segarkanStat)
+        pcall(segarkanUpgrade)
+        segarkanBest()
+    end
+end
+
+local function jagaLayar()
+    task.wait(3)
+    buatLayar()
+    -- Pulihkan setelan tersimpan. Tanpa baris ini layar yang ditinggalkan
+    -- menyala tidak pernah muncul lagi sesudah rejoin -- tombolnya menulis ON,
+    -- tapi layarnya tetap gelap. Salah yang tidak memunculkan error apa pun.
+    Layar.tampil(Config.LayarHitam)
+
+    local pg = game:GetService("Players").LocalPlayer:FindFirstChild("PlayerGui")
+    local mg = pg and pg:FindFirstChild("MainGui")
+    local ng = mg and mg:FindFirstChild("NotificationGUI")
+    if ng then
+        Layar.conn[#Layar.conn + 1] = ng.ChildAdded:Connect(function(d)
+            if not Layar.terlihat then return end
+            task.defer(function()
+                local t = tostring((d:IsA("TextLabel") and d.Text) or "")
+                if t ~= "" and string.find(t, "Caught") then
+                    pcall(Layar.catatTangkapan, t)
+                end
+            end)
+        end)
+    end
+
+    local n = 0
+    while S.hidup do
+        if Layar.terlihat then
+            pcall(segarkanStat)
+            n = n + 1
+            -- Upgrade lebih jarang: itu panggilan ke server, bukan atribut lokal.
+            if n % 5 == 0 then pcall(segarkanUpgrade) end
+        end
+        task.wait(2)
+    end
+end
+
 -- =========================================================================
 -- LAPORAN TANGKAPAN LANGKA KE DISCORD
 --
@@ -820,6 +1250,10 @@ local function pasangWebhook()
         for _, hadiah in pairs(d.rewards) do
             if type(hadiah) == "table" and hadiah.rarity then
                 local peringkat = RO[tostring(hadiah.rarity)]
+                -- Papan Best Catch memajang lima terbaik SESI INI, jadi ia diberi
+                -- makan tiap tangkapan -- bukan hanya yang lolos ambang Discord.
+                pcall(Layar.tawarkan, tostring(hadiah.name), tostring(hadiah.rarity),
+                      peringkat, tostring(hadiah.typeName or ""), tonumber(hadiah.cps))
                 if peringkat and peringkat >= ambang then
                     task.spawn(function() pcall(laporkan, hadiah) end)
                 else
@@ -1524,7 +1958,7 @@ local function bangunGui()
     sg.DisplayOrder = 9999
     sg.Parent = induk
 
-    local LEBAR, TINGGI, TINGGI_KECIL = 212, 212, 32
+    local LEBAR, TINGGI, TINGGI_KECIL = 212, 242, 32
 
     local bingkai = Instance.new("Frame")
     bingkai.Name = "Panel"
@@ -1694,6 +2128,9 @@ local function bangunGui()
     local bPond = pil("Pond", 14, 184, 148, 24)
     bPond.TextSize = 11
 
+    local bLayar = pil("Layar", 14, 184, 178, 24)
+    bLayar.TextSize = 11
+
     -- Warna mengikuti angkanya supaya bisa dinilai sekilas tanpa dibaca:
     -- di layar penuh 8-10 klien, membaca angka satu per satu tidak praktis.
     local function catFps(nilai)
@@ -1757,6 +2194,18 @@ local function bangunGui()
     -- Tombol ini TIDAK memindahkan apa pun -- ia melapor. Yang ditampilkan
     -- kolam tempat kita memancing SEKARANG, dan kalau ada yang lebih baik,
     -- namanya ikut disebut supaya pemain yang memutuskan mau pindah atau tidak.
+    local function catLayar()
+        if Config.LayarHitam then
+            bLayar.Text = "BLACKSCREEN: ON"
+            bLayar.BackgroundColor3 = Color3.fromRGB(58, 58, 74)
+            bLayar.TextColor3 = Color3.fromRGB(232, 232, 240)
+        else
+            bLayar.Text = "BLACKSCREEN: OFF"
+            bLayar.BackgroundColor3 = W.tombol
+            bLayar.TextColor3 = W.redup
+        end
+    end
+
     local function catPond()
         local kini = S.pondName
         if not Config.SaranKolam then
@@ -1824,6 +2273,13 @@ local function bangunGui()
 
     bKurang.Activated:Connect(function() geser(-1) end)
     bTambah.Activated:Connect(function() geser(1) end)
+    bLayar.Activated:Connect(function()
+        Config.LayarHitam = not Config.LayarHitam
+        pcall(Layar.tampil, Config.LayarHitam)
+        catLayar()
+        tulisSimpanan()
+    end)
+
     bPond.Activated:Connect(function()
         Config.SaranKolam = not Config.SaranKolam
         catPond()
@@ -1866,6 +2322,7 @@ local function bangunGui()
     catNilai()
     catBoost()
     catPond()
+    catLayar()
 
     Gui.ada = true
     Gui.sg = sg
@@ -1876,6 +2333,7 @@ local function bangunGui()
     Gui.catFps = catFps
     Gui.catBoost = catBoost
     Gui.catPond = catPond
+    Gui.catLayar = catLayar
     Gui.statistik = rinci   -- dipertahankan: ada kode lama yang menyentuhnya
 end
 
@@ -2348,6 +2806,7 @@ task.spawn(jagaKolam)
 task.spawn(jagaKlaim)
 task.spawn(jagaGem)
 task.spawn(pasangWebhook)
+task.spawn(jagaLayar)
 
 -- Mulai sendiri, jangan menunggu dipancing dari luar.
 --
@@ -2415,6 +2874,17 @@ end
 
 -- =========================================================================
 -- PELEPAS
+-- Saklar dari luar, supaya layar bisa dikendalikan tanpa mengklik panel
+-- (berguna saat menjalankan banyak klien).
+getgenv().MozeFishLayar = function(nyala)
+    if nyala == nil then nyala = not Config.LayarHitam end
+    Config.LayarHitam = nyala and true or false
+    pcall(Layar.tampil, Config.LayarHitam)
+    if Gui.ada then pcall(Gui.catLayar) end
+    pcall(tulisSimpanan)
+    return Config.LayarHitam
+end
+
 getgenv().MozeFishStop = function()
     S.hidup = false
     Config.Aktif = false
@@ -2422,6 +2892,13 @@ getgenv().MozeFishStop = function()
     S.conn = {}
     if Gui.sg then pcall(function() Gui.sg:Destroy() end) end
     Gui.ada = false
+    -- Layar ikut dibersihkan: meninggalkannya berarti layar hitam menempel
+    -- selamanya sesudah script dilepas, dan itu persis perilaku kaitun utama
+    -- yang justru ingin dihindari di sini.
+    pcall(function() if Layar.sg then Layar.sg:Destroy() end end)
+    Layar.ada, Layar.terlihat = false, false
+    for _, c in ipairs(Layar.conn) do pcall(function() c:Disconnect() end) end
+    getgenv().MozeFishLayar = nil
     getgenv().MozeFishStop = nil
     getgenv().MozeFishInfo = nil
     catat("dilepas. %d siklus, %d tembakan, %d diterima.", S.siklus, S.tembak, S.diterima)
