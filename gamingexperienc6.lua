@@ -261,13 +261,14 @@ local Config = {
 
 
     -- ==== PILIH KOLAM OTOMATIS ====
-    -- Menilai semua kolam yang kekuatan rod-nya cukup, lalu pindah ke yang
-    -- terbaik. DEFAULT MATI: ia memindahkan karakter tanpa diminta, dan itu
-    -- tidak boleh terjadi diam-diam.
-    AutoPindahPond  = pilihSaklar("AutoPindahPond", false),
+    -- Menilai kolam mana yang paling produktif dengan rod yang dimiliki, lalu
+    -- MENAMPILKANNYA di panel. Tidak pernah memindahkan karakter -- ini script
+    -- pendamping, posisi tetap milik pemain. Default nyala karena ia cuma
+    -- membaca dan menampilkan; tidak ada yang bisa rusak karenanya.
+    SaranKolam      = pilihSaklar("SaranKolam", true),
     JedaPeriksaPond = tonumber(U.JedaPeriksaPond) or 20,
-    -- Sudah dianggap berada di kolam kalau sedekat ini -- tidak perlu teleport.
-    RadiusKolam     = tonumber(U.RadiusKolam) or 60,
+    -- Sejauh mana kolam masih dianggap milik kita saat script mendeteksi sendiri.
+    JangkauanKolam  = tonumber(U.JangkauanKolam) or 120,
     -- Kolam yang MEMAKSA rarity ini ke atas selalu menang atas skor laju.
     RarityPrioritas = U.RarityPrioritas or "Mythical",
     -- Isi nama kolam untuk mengunci pilihan dan melewati penilaian.
@@ -289,7 +290,19 @@ local Config = {
     -- sudah dihapus tidak bisa dikembalikan tanpa rejoin. Fitur yang tidak
     -- bisa dibatalkan tidak boleh menyala tanpa diminta.
     BoostFps        = pilihSaklar("BoostFps", false),
-    FpsCap          = tonumber(U.FpsCap) or 240,
+    -- NOL BERARTI TANPA BATAS, dan itu bukan sekadar konvensi -- itu yang
+    -- paling cepat. Terukur di akun uji (executor Potassium, satu mesin,
+    -- pengukuran berurutan 4-5 detik masing-masing):
+    --
+    --     tanpa cap ....... 229 fps
+    --     setfpscap(240) .. 221
+    --     setfpscap(1000) . 216   <- justru TURUN
+    --     setfpscap(0) .... 276   <- tertinggi
+    --
+    -- Angka besar seperti 1000 terlihat seperti tanpa batas, tapi executor
+    -- tetap memasang penjadwal untuk mengejarnya dan hasilnya lebih lambat
+    -- daripada tidak dibatasi sama sekali. Jangan diganti tanpa mengukur ulang.
+    FpsCap          = tonumber(U.FpsCap) or 0,
     BekukanAnimasi  = pilihSaklar("BekukanAnimasi", true),
     BuangGui        = pilihSaklar("BuangGui", true),
     RampingPeta     = pilihSaklar("RampingPeta", true),
@@ -326,7 +339,7 @@ local function tulisSimpanan()
             TolakRoll  = Config.TolakRoll,
             AmbangRoll = Config.AmbangRoll,
             BoostFps   = Config.BoostFps,
-            AutoPindahPond = Config.AutoPindahPond,
+            SaranKolam = Config.SaranKolam,
             AutoKlaim  = Config.AutoKlaim,
             KlaimHarian = Config.KlaimHarian,
         }))
@@ -431,6 +444,53 @@ local function tembak()
     pcall(function()
         FishingRequestStart:FireServer(S.pond, S.target)
     end)
+end
+
+-- Menemukan kolam sendiri dari DUNIA, tanpa menunggu event Started.
+--
+-- KENAPA INI ADA. Dulu satu-satunya sumber nama kolam adalah event Started, dan
+-- itu saling mengunci: begitu pemain pindah kolam, script masih menembak kolam
+-- LAMA yang kini jauh, server membalas Denied, dan Started tidak pernah datang
+-- sehingga kolamnya tidak pernah diperbarui. Gejalanya panel tetap menulis
+-- PONDAREA1 padahal pemain sudah berdiri di PONDAREA2, dan siklus berhenti
+-- bertambah tanpa satu pun pesan galat.
+--
+-- Jarak diukur ke PERMUKAAN zona, bukan ke pusatnya. Zona PONDAREA1 terukur
+-- 837 stud panjangnya, jadi jarak-ke-pusat bisa ratusan stud padahal kita
+-- berdiri tepat di tepinya.
+local function deteksiKolam()
+    local pemain = game:GetService("Players").LocalPlayer
+    local hrp = pemain.Character and pemain.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+
+    local zona, dekat = nil, math.huge
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("BasePart") and string.match(d.Name, "^PONDAREA%d+$") then
+            local l = d.CFrame:PointToObjectSpace(hrp.Position)
+            local h = d.Size / 2
+            local luar = Vector3.new(
+                math.max(math.abs(l.X) - h.X, 0),
+                math.max(math.abs(l.Y) - h.Y, 0),
+                math.max(math.abs(l.Z) - h.Z, 0))
+            if luar.Magnitude < dekat then zona, dekat = d, luar.Magnitude end
+        end
+    end
+    if not zona or dekat > Config.JangkauanKolam then return false end
+
+    -- Target WAJIB dekat pemain. Mengirim pusat zona membuat server membalas
+    -- Denied -- terukur di PONDAREA1 yang zonanya sangat panjang. Karena itu
+    -- posisi kita diproyeksikan ke titik terdekat DI DALAM zona.
+    local l = zona.CFrame:PointToObjectSpace(hrp.Position)
+    local h = zona.Size / 2
+    S.target = zona.CFrame:PointToWorldSpace(Vector3.new(
+        math.clamp(l.X, -h.X, h.X),
+        math.clamp(l.Y, -h.Y, h.Y),
+        math.clamp(l.Z, -h.Z, h.Z)))
+    if S.pondName ~= zona.Name then
+        catat("kolam terdeteksi: %s (%d stud)", zona.Name, math.floor(dekat))
+    end
+    S.pond, S.pondName = zona, zona.Name
+    return true
 end
 
 -- =========================================================================
@@ -768,9 +828,17 @@ local function taksirTunggu(rodCfg, pondCfg)
         return rerata(pondCfg.PondCatchTime, 3)
     end
     local dasar = rerata(rodCfg and rodCfg.PondCatchTime, 3)
-    local mn = tonumber(pondCfg.PondCatchTimeMultiMINIMUM) or 0
+    -- NOL BERARTI "TANPA MODIFIER", BUKAN "DIKALI NOL". Salah membaca ini
+    -- membuat PONDAREA1 ditaksir 0 detik -- yang berarti laju tak terhingga --
+    -- dan penilai selalu memilihnya. Terukur di server, PONDAREA1 justru 1,09
+    -- dtk dan PONDAREA2 0,952 dtk, jadi arahnya terbalik total.
+    local mn = tonumber(pondCfg.PondCatchTimeMultiMINIMUM)
     local mx = tonumber(pondCfg.PondCatchTimeMultiMAXIMUM)
-    if not mx then return dasar end          -- tanpa pengali: pakai milik rod
+    if mn == 0 then mn = nil end
+    if mx == 0 then mx = nil end
+    if not mn and not mx then return dasar end
+    if not mn then return dasar * mx end
+    if not mx then return dasar * mn end
     return dasar * ((mn + mx) / 2)
 end
 
@@ -917,49 +985,44 @@ function Kolam.ambangAwal(nama)
     return math.max(Config.AmbangMin, math.min(Config.AmbangMaks, tunggu * 0.8))
 end
 
-function Kolam.pindah(nama)
-    local part, jarak = partKolam(nama, true)
-    if not part then return false, "tidak ada penanda TP" .. nama end
-    local hrp = PemainLokal.Character and PemainLokal.Character:FindFirstChild("HumanoidRootPart")
-    if not hrp then return false, "karakter belum ada" end
-    if jarak and jarak < Config.RadiusKolam then return true, "sudah di kolam" end
-    local ok = pcall(function()
-        hrp.CFrame = CFrame.new(part.Position + Vector3.new(0, 3, 0))
-    end)
-    if ok then
-        return true, string.format("pindah ke %s (%d stud)", nama, math.floor(jarak or 0))
-    end
-    return false, "teleport ditolak"
-end
+
 
 -- Penjaga berkala. Sengaja jarang: memindai seluruh workspace itu mahal, dan
 -- kolam tidak berganti tiap detik. Yang berubah cuma kolam EVENT, dan jeda 20
 -- detik masih menangkapnya jauh sebelum event berakhir.
+-- Menilai kolam lalu MENYARANKAN -- tidak pernah memindahkan karakter.
+--
+-- Auto-teleport sengaja DIBUANG. Ini script pendamping: pemain yang memegang
+-- kendali atas posisinya sendiri, dan karakter yang berpindah tanpa diminta di
+-- tengah permainan itu mengejutkan, bukan membantu. Kemampuan teleportnya
+-- sendiri sudah terbukti jalan saat diuji (penanda TPPONDAREA, bertahan tanpa
+-- ditarik server), tapi terbukti bisa bukan alasan untuk memakainya.
+--
+-- Yang tersisa berguna: menghitung kolam mana yang paling produktif dengan rod
+-- yang kamu punya, lalu menampilkannya di panel supaya kamu yang memutuskan.
 local function jagaKolam()
     while S.hidup do
         task.wait(Config.JedaPeriksaPond)
-        if Config.AutoPindahPond then
+        if Config.SaranKolam then
             local ok, err = pcall(function()
                 local nama, alasan = Kolam.nilai()
-                if nama and nama ~= Kolam.pilihan then
-                    local berhasil, pesan = Kolam.pindah(nama)
-                    if berhasil then
-                        Kolam.pilihan, Kolam.alasan = nama, alasan
-                        catat("kolam -> %s | %s", nama, alasan)
-                        if Gui.ada then pcall(Gui.catPond) end
-                        -- Paksa siklus baru supaya event Started berikutnya
-                        -- datang dari kolam yang benar.
-                        S.pond, S.pondName, S.target = nil, nil, nil
-                        task.delay(0.5, tembak)
-                    else
-                        catat("kolam %s gagal: %s", nama, tostring(pesan))
-                    end
+                if not nama then return end
+                Kolam.pilihan, Kolam.alasan = nama, alasan
+                -- Dicatat SEKALI saja tiap kali saran berubah. Kolam yang sama
+                -- dilaporkan tiap 20 detik cuma memenuhi konsol.
+                if nama ~= S.pondName and nama ~= Kolam.saranTerakhir then
+                    Kolam.saranTerakhir = nama
+                    catat("saran kolam: %s | %s", nama, alasan)
+                elseif nama == S.pondName then
+                    Kolam.saranTerakhir = nil
                 end
+                if Gui.ada then pcall(Gui.catPond) end
             end)
             if not ok then catat("jagaKolam galat: %s", tostring(err):sub(1, 70)) end
         end
     end
 end
+
 
 -- Ambang yang BERLAKU sekarang: angka manual kalau diisi, hasil hitungan
 -- kalau mode auto, dan AmbangAwal selama sampel belum cukup.
@@ -986,11 +1049,36 @@ S.conn[#S.conn + 1] = FishingState.OnClientEvent:Connect(function(d)
             -- Lempar lagi supaya siklus tidak menunggu pemicu berikutnya;
             -- tanpa ini script bisa diam sampai ada Started dari mana pun.
             task.delay(1, tembak)
+            S.ditolakBeruntun = 0
+            return
+        end
+
+        -- BUSY berarti sesi kita SENDIRI masih berjalan -- bukan masalah kolam,
+        -- dan sering muncul saat dua tembakan berpapasan. Terukur: satu probe
+        -- luar yang menembak bersamaan menghasilkan belasan BUSY berturut-turut
+        -- padahal loop utamanya sehat. Memicu pemindaian workspace karena ini
+        -- cuma memboroskan waktu di jalur yang paling panas.
+        if tostring(d.reason) == "BUSY" then return end
+
+        -- Sebab SELAIN rod dan BUSY -- yang paling sering: kolam yang kita
+        -- pegang sudah jauh karena pemain pindah. Dulu cabang ini kosong dan
+        -- script diam selamanya. Ditunggu tiga kali dulu supaya penolakan
+        -- sesaat tidak memicu pemindaian workspace yang mahal.
+        S.ditolakBeruntun = (S.ditolakBeruntun or 0) + 1
+        if S.ditolakBeruntun >= 3
+           and (not S.tDeteksi or (t - S.tDeteksi) > 3) then
+            S.tDeteksi = t
+            S.ditolakBeruntun = 0
+            if deteksiKolam() then
+                if Gui.ada then pcall(Gui.catPond) end
+                task.delay(0.3, tembak)
+            end
         end
         return
     end
 
     if kind == "Started" then
+        S.ditolakBeruntun = 0
         -- Selalu segarkan: pemain bisa pindah kolam, dan targetPos ikut geser.
         if d.targetPos then S.target = d.targetPos end
         if d.pondName and d.pondName ~= S.pondName then
@@ -1383,17 +1471,26 @@ local function bangunGui()
             biaya and string.format("%.0fms", biaya * 1000) or "--")
     end
 
+    -- Tombol ini TIDAK memindahkan apa pun -- ia melapor. Yang ditampilkan
+    -- kolam tempat kita memancing SEKARANG, dan kalau ada yang lebih baik,
+    -- namanya ikut disebut supaya pemain yang memutuskan mau pindah atau tidak.
     local function catPond()
-        if Config.AutoPindahPond then
-            -- Nama kolam yang sedang dituju lebih berguna daripada kata ON:
-            -- kalau pilihannya meleset, itu terlihat langsung dari panel.
-            bPond.Text = "POND: " .. tostring(Kolam.pilihan or S.pondName or "mencari...")
-            bPond.BackgroundColor3 = Color3.fromRGB(28, 104, 96)
-            bPond.TextColor3 = Color3.fromRGB(214, 255, 246)
-        else
-            bPond.Text = "AUTO POND: OFF"
+        local kini = S.pondName
+        if not Config.SaranKolam then
+            bPond.Text = "POND: " .. tostring(kini or "?")
             bPond.BackgroundColor3 = W.tombol
             bPond.TextColor3 = W.redup
+            return
+        end
+        local saran = Kolam.pilihan
+        if kini and saran and saran ~= kini then
+            bPond.Text = kini .. "  \f  " .. saran .. " lebih baik"
+            bPond.BackgroundColor3 = Color3.fromRGB(150, 96, 24)
+            bPond.TextColor3 = Color3.fromRGB(255, 240, 220)
+        else
+            bPond.Text = "POND: " .. tostring(kini or saran or "mencari...")
+            bPond.BackgroundColor3 = Color3.fromRGB(28, 104, 96)
+            bPond.TextColor3 = Color3.fromRGB(214, 255, 246)
         end
     end
 
@@ -1445,7 +1542,7 @@ local function bangunGui()
     bKurang.Activated:Connect(function() geser(-1) end)
     bTambah.Activated:Connect(function() geser(1) end)
     bPond.Activated:Connect(function()
-        Config.AutoPindahPond = not Config.AutoPindahPond
+        Config.SaranKolam = not Config.SaranKolam
         catPond()
         tulisSimpanan()
     end)
@@ -1637,6 +1734,22 @@ end
 --
 -- Terukur: 24.630 instance plot orang lain + 1.334 hiasan peta + 830 karakter
 -- jatuhan; posisi Y tetap, nyawa penuh, kolam utuh.
+-- Folder dunia yang tidak dipakai bot sama sekali. LeaderBoards saja berisi
+-- 13.658 instance -- 52% dari seluruh workspace.
+--
+-- JUJUR SOAL HASILNYA: membuangnya diukur dan FPS TIDAK naik (231 -> 225,
+-- selisih di dalam derau). Papan-papan itu rupanya tidak dirender saat berada
+-- di luar layar, jadi jumlah instance bukan penghambatnya di mesin uji.
+-- Tetap dibuang karena gratis dan bisa membantu perangkat lemah yang
+-- menjalankan banyak klien -- tapi jangan berharap lonjakan.
+--
+-- PondAreas dan PondAreasTeleports TIDAK BOLEH IKUT: mancing mengirim
+-- instance PONDAREA ke server, dan penanda TP dipakai menemukan kolam.
+local FOLDER_SIA = {
+    "LeaderBoards", "DevProducts", "TutorialAreas", "UpdateStands",
+    "UpdateBoards", "LikesCounter", "CharacterOfTheHour", "CharacterOfTheDay",
+}
+
 local function sapuPeta()
     local lp = game:GetService("Players").LocalPlayer
 
@@ -1648,6 +1761,21 @@ local function sapuPeta()
             if tostring(plot:GetAttribute("OwnerUserId")) ~= tostring(lp.UserId) then
                 Boost.peta = Boost.peta + #plot:GetDescendants()
                 pcall(function() plot:Destroy() end)
+            end
+        end
+    end
+
+    local scripted = workspace:FindFirstChild("Scripted")
+    if scripted then
+        for _, nama in ipairs(FOLDER_SIA) do
+            -- Beberapa muncul lebih dari sekali (LikesCounter ada dua), jadi
+            -- disapu berulang sampai habis, bukan sekali ambil.
+            while true do
+                local v = scripted:FindFirstChild(nama)
+                if not v then break end
+                Boost.peta = Boost.peta + #v:GetDescendants()
+                local ok = pcall(function() v:Destroy() end)
+                if not ok then break end
             end
         end
     end
@@ -1936,6 +2064,26 @@ end)
 task.spawn(jagaKolam)
 task.spawn(jagaKlaim)
 
+-- Mulai sendiri, jangan menunggu dipancing dari luar.
+--
+-- Dulu script diam sampai ada event Started -- padahal Started baru datang
+-- kalau ADA yang menembak lebih dulu. Kalau pemain menjalankan script tanpa
+-- sempat memancing manual sekali, script tidak pernah mulai sama sekali, dan
+-- panel cuma menulis "menunggu siklus pertama" selamanya.
+task.spawn(function()
+    for _ = 1, 20 do
+        if not S.hidup then return end
+        if S.pond and S.target then return end   -- sudah jalan dari sumber lain
+        if Config.Aktif and deteksiKolam() then
+            if Gui.ada then pcall(Gui.catPond) end
+            tembak()
+            return
+        end
+        task.wait(1.5)
+    end
+    catat("tidak menemukan kolam dalam 30 detik -- berdirilah di dekat kolam")
+end)
+
 -- =========================================================================
 -- PEMERIKSA KEADAAN
 -- Berguna saat menjalankan banyak akun: keadaan bisa dibaca dari luar tanpa
@@ -1960,7 +2108,7 @@ getgenv().MozeFishInfo = function()
             harian = Klaim.harian, galat = Klaim.galat,
             pesanGalat = Klaim.pesanGalat ~= "" and Klaim.pesanGalat or nil,
         } or false,
-        autoPindah  = Config.AutoPindahPond,
+        saranKolam  = Config.SaranKolam,
         simpan      = Config.Simpan,
         antiAfk     = Config.AntiAfk,
         rodPasang   = S.rodPasang,
