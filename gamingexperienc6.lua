@@ -259,15 +259,6 @@ local Config = {
     -- script bisa membatalkan selamanya dan MALAH tidak menangkap apa pun.
     MaksTolakBeruntun = tonumber(U.MaksTolakBeruntun) or 25,
 
-    -- ==== MODE BLATANT ====
-    -- Mencabut pengaman anti-loop: roll ditolak terus sampai dapat yang bagus,
-    -- tanpa batas beruntun. Lebih cepat, tapi juga jauh lebih kentara dari luar
-    -- -- tali dan pelampung berkedip terus-menerus di layar pemain lain.
-    --
-    -- DEFAULT MATI. Pengaman 25-beruntun itu ada karena alasan nyata: kalau
-    -- server berhenti mengacak dan selalu mengirim angka besar, tanpa batas
-    -- script membatalkan SELAMANYA dan tidak menangkap apa pun.
-    Blatant = pilihSaklar("Blatant", false),
 
     -- ==== PILIH KOLAM OTOMATIS ====
     -- Menilai semua kolam yang kekuatan rod-nya cukup, lalu pindah ke yang
@@ -335,7 +326,6 @@ local function tulisSimpanan()
             TolakRoll  = Config.TolakRoll,
             AmbangRoll = Config.AmbangRoll,
             BoostFps   = Config.BoostFps,
-            Blatant    = Config.Blatant,
             AutoPindahPond = Config.AutoPindahPond,
             AutoKlaim  = Config.AutoKlaim,
             KlaimHarian = Config.KlaimHarian,
@@ -1086,7 +1076,7 @@ S.conn[#S.conn + 1] = FishingState.OnClientEvent:Connect(function(d)
 
         if Config.TolakRoll and FishingCancel and w and S.pond and S.target
            and w >= ambang()
-           and (Config.Blatant or S.tolakBeruntun < Config.MaksTolakBeruntun) then
+           and S.tolakBeruntun < Config.MaksTolakBeruntun then
             S.tolak = S.tolak + 1
             S.tolakBeruntun = S.tolakBeruntun + 1
             S.tTolak = t
@@ -1163,7 +1153,7 @@ local function bangunGui()
     sg.DisplayOrder = 9999
     sg.Parent = induk
 
-    local LEBAR, TINGGI, TINGGI_KECIL = 212, 238, 32
+    local LEBAR, TINGGI, TINGGI_KECIL = 212, 212, 32
 
     local bingkai = Instance.new("Frame")
     bingkai.Name = "Panel"
@@ -1330,10 +1320,7 @@ local function bangunGui()
     local bBoost = pil("Boost", 14, 184, 118, 24)
     bBoost.TextSize = 11
 
-    local bBlatant = pil("Blatant", 14, 212, 118, 24)
-    bBlatant.TextSize = 11
-
-    local bPond = pil("Pond", 14, 240, 184, 24)
+    local bPond = pil("Pond", 14, 184, 148, 24)
     bPond.TextSize = 11
 
     -- Warna mengikuti angkanya supaya bisa dinilai sekilas tanpa dibaca:
@@ -1360,15 +1347,17 @@ local function bangunGui()
 
     local function catRoll()
         if not FishingCancel then
-            tombolRoll.Text = "ROLL: N/A"
+            tombolRoll.Text = "BLATANT: N/A"
             tombolRoll.BackgroundColor3 = W.tombol
             tombolRoll.TextColor3 = W.redup
         elseif Config.TolakRoll then
-            tombolRoll.Text = "TOLAK-ROLL"
+            -- Dinamai BLATANT di panel: itu istilah yang dipakai pemakainya.
+            -- Nama internalnya tetap TolakRoll supaya setelan lama tetap terbaca.
+            tombolRoll.Text = "BLATANT: ON"
             tombolRoll.BackgroundColor3 = W.biru
             tombolRoll.TextColor3 = W.terang
         else
-            tombolRoll.Text = "ROLL: MATI"
+            tombolRoll.Text = "BLATANT: OFF"
             tombolRoll.BackgroundColor3 = W.ungu
             tombolRoll.TextColor3 = W.terang
         end
@@ -1392,18 +1381,6 @@ local function bangunGui()
         rinci.Text = string.format("%d character · buang %d · %s",
             siklus or 0, tolak or 0,
             biaya and string.format("%.0fms", biaya * 1000) or "--")
-    end
-
-    local function catBlatant()
-        if Config.Blatant then
-            bBlatant.Text = "BLATANT: ON"
-            bBlatant.BackgroundColor3 = Color3.fromRGB(158, 42, 66)
-            bBlatant.TextColor3 = Color3.fromRGB(255, 226, 232)
-        else
-            bBlatant.Text = "BLATANT: OFF"
-            bBlatant.BackgroundColor3 = W.tombol
-            bBlatant.TextColor3 = W.redup
-        end
     end
 
     local function catPond()
@@ -1467,12 +1444,6 @@ local function bangunGui()
 
     bKurang.Activated:Connect(function() geser(-1) end)
     bTambah.Activated:Connect(function() geser(1) end)
-    bBlatant.Activated:Connect(function()
-        Config.Blatant = not Config.Blatant
-        catBlatant()
-        tulisSimpanan()
-    end)
-
     bPond.Activated:Connect(function()
         Config.AutoPindahPond = not Config.AutoPindahPond
         catPond()
@@ -1514,7 +1485,6 @@ local function bangunGui()
     catRoll()
     catNilai()
     catBoost()
-    catBlatant()
     catPond()
 
     Gui.ada = true
@@ -1525,7 +1495,6 @@ local function bangunGui()
     Gui.catStat = catStat
     Gui.catFps = catFps
     Gui.catBoost = catBoost
-    Gui.catBlatant = catBlatant
     Gui.catPond = catPond
     Gui.statistik = rinci   -- dipertahankan: ada kode lama yang menyentuhnya
 end
@@ -1986,7 +1955,6 @@ getgenv().MozeFishInfo = function()
         pondPilihan = Kolam.pilihan,
         pondAlasan  = Kolam.alasan,
         kekuatanRod = Kolam.kekuatan,
-        blatant     = Config.Blatant,
         klaim       = Config.AutoKlaim and {
             playtime = Klaim.playtime, quest = Klaim.quest,
             harian = Klaim.harian, galat = Klaim.galat,
