@@ -439,6 +439,12 @@ local S = {
     ambangAktif = nil, -- hasil hitungan terakhir (nil = belum ada)
     hitungSejak = 0,   -- berapa roll sejak terakhir dihitung ulang
     siklus      = 0,
+    -- KARAKTER, bukan siklus. Satu Completed membawa tabel `rewards` yang
+    -- berisi BEBERAPA karakter sekaligus -- terukur di akun dengan triple
+    -- catch: 3x34, 4x7, 5x10, 6x1 dari 52 siklus, rata-rata 3,58 dan tidak
+    -- pernah di bawah 3. Panel dulu menampilkan siklus tapi menamainya
+    -- "character/menit", jadi angkanya terlalu kecil 3,58 kali.
+    karakter    = 0,
     tembak      = 0,
     diterima    = 0,
     jumRestart  = 0,
@@ -1923,6 +1929,14 @@ S.conn[#S.conn + 1] = FishingState.OnClientEvent:Connect(function(d)
     elseif kind == "Completed" then
         if not S.tMulai then S.tMulai = t end
         S.siklus = S.siklus + 1
+        -- Dihitung dengan pairs, bukan #d.rewards: panjang tabel Luau tidak
+        -- bisa dipercaya untuk tabel yang datang dari jaringan -- terukur
+        -- pernah melaporkan 3 untuk isi yang sebenarnya 4.
+        local n = 0
+        if type(d.rewards) == "table" then
+            for _ in pairs(d.rewards) do n = n + 1 end
+        end
+        S.karakter = S.karakter + (n > 0 and n or 1)
         S.tCompleted = t
 
         -- SATU tembakan. Tidak pernah lebih -- lihat catatan 64:3 di atas.
@@ -2202,10 +2216,13 @@ local function bangunGui()
 
     -- Statistik dipecah: angka besar terpisah dari keterangan kecil, jadi
     -- pemanggil tidak perlu tahu susunan panelnya.
-    local function catStat(ikanPerMenit, siklus, tolak, biaya)
-        angka.Text = string.format("%.1f", ikanPerMenit or 0)
-        rinci.Text = string.format("%d character · buang %d · %s",
-            siklus or 0, tolak or 0,
+    -- Angka besar sekarang KARAKTER per menit, bukan siklus. Keduanya dikirim
+    -- supaya barisan rincinya tetap bisa menunjukkan laju tangkapan -- dua
+    -- angka itu berbeda jauh begitu multi-pull aktif.
+    local function catStat(karPerMenit, tangkapPerMenit, karakter, tolak, biaya)
+        angka.Text = string.format("%.1f", karPerMenit or 0)
+        rinci.Text = string.format("%d char · %.0f tangkap/mnt · buang %d · %s",
+            karakter or 0, tangkapPerMenit or 0, tolak or 0,
             biaya and string.format("%.0fms", biaya * 1000) or "--")
     end
 
@@ -2827,8 +2844,12 @@ task.spawn(function()
             local jalan = os.clock() - S.tMulai
             pcall(function()
                 local perSiklus = jalan / (S.siklus - 1)
-                Gui.catStat(perSiklus > 0 and (60 / perSiklus) or 0,
-                    S.siklus, S.tolak, S.biaya)
+                local tangkapMnt = perSiklus > 0 and (60 / perSiklus) or 0
+                -- Karakter dibagi waktu berjalan langsung, bukan dikali
+                -- rata-rata per siklus: multi-pull berubah-ubah tiap tarikan,
+                -- jadi mengalikan rata-rata menambah galat tanpa alasan.
+                local karMnt = jalan > 0 and (S.karakter / jalan * 60) or 0
+                Gui.catStat(karMnt, tangkapMnt, S.karakter, S.tolak, S.biaya)
             end)
         end
 
@@ -2837,7 +2858,8 @@ task.spawn(function()
             local jalan = os.clock() - (S.tMulai or os.clock())
             local perSiklus = S.siklus > 1 and (jalan / (S.siklus - 1)) or 0
             local restart = S.nRestart > 0 and (S.jumRestart / S.nRestart) or 0
-            catat("%.1f character/menit | %d siklus | restart %.3f | buang %d | rr %s | diterima %d/%d%s",
+            catat("%.1f karakter/menit (%.1f tangkap/mnt) | %d siklus | restart %.3f | buang %d | rr %s | diterima %d/%d%s",
+                jalan > 0 and (S.karakter / jalan * 60) or 0,
                 perSiklus > 0 and (60 / perSiklus) or 0, S.siklus, restart, S.tolak,
                 S.biaya and string.format("%.0fms", S.biaya * 1000) or "-",
                 S.diterima, S.tembak,
@@ -2886,7 +2908,9 @@ getgenv().MozeFishInfo = function()
         biayaReroll = S.biaya,
         siklus      = S.siklus,
         tolak       = S.tolak,
-        charPerMenit = (S.siklus > 1 and jalan > 0) and (60 / (jalan / (S.siklus - 1))) or 0,
+        charPerMenit = (jalan > 0) and (S.karakter / jalan * 60) or 0,
+        tangkapPerMenit = (S.siklus > 1 and jalan > 0) and (60 / (jalan / (S.siklus - 1))) or 0,
+        karakter    = S.karakter,
         pond        = S.pondName,
         pondPilihan = Kolam.pilihan,
         pondAlasan  = Kolam.alasan,
