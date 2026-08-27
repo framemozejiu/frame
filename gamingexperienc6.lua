@@ -121,8 +121,13 @@ Terukur di akun sungguhan, 6 pemain di server:
 
 Yang dilakukan: setfpscap(240), matikan bayangan & post-effect, air tanpa
 pantulan, matikan semua ParticleEmitter/Trail/lampu, hapus 34 ribu Texture
-dan Decal, bekukan animasi (termasuk yang baru dimainkan), buang GUI berat
-yang tidak dipakai mancing, dan pangkas plot pemain lain + hiasan peta.
+dan Decal, bekukan animasi (termasuk yang baru dimainkan), buang dua layar
+sekali-tayang, dan pangkas plot pemain lain + hiasan peta.
+
+CATATAN 2026-08-28 -- angka di tabel atas didapat dengan sapuan LAMA, yang
+juga menghapus seluruh toko dan seluruh NPC dunia. Keduanya sudah dicabut
+(lihat komentar di daftar BUANG dan di sapuPeta), jadi baris "+ animasi &
+GUI" tidak lagi mewakili apa yang dijalankan sekarang. Perlu diukur ulang.
 
 Aturan peta dipilih supaya MUSTAHIL menjatuhkan pemain: hanya BasePart
 ber-CanCollide=false yang dibuang. PONDAREA* dikecualikan -- instance-nya
@@ -2501,7 +2506,11 @@ end
 -- instance PONDAREA ke server, dan penanda TP dipakai menemukan kolam.
 local FOLDER_SIA = {
     "LeaderBoards", "DevProducts", "TutorialAreas", "UpdateStands",
-    "UpdateBoards", "LikesCounter", "CharacterOfTheHour", "CharacterOfTheDay",
+    "UpdateBoards", "LikesCounter",
+    -- CharacterOfTheHour dan CharacterOfTheDay DIKELUARKAN: yang kedua berisi
+    -- satu model ber-Humanoid (terukur: Guthia), jadi membuangnya ikut
+    -- menghapus NPC yang terlihat pemain. Isinya cuma 15 dan 220 instance --
+    -- tidak sepadan dengan satu NPC yang hilang.
 }
 
 local function sapuPeta()
@@ -2534,11 +2543,17 @@ local function sapuPeta()
         end
     end
 
-    local sc = workspace:FindFirstChild("SpawnedCharacters")
-    if sc then
-        Boost.peta = Boost.peta + #sc:GetDescendants()
-        pcall(function() sc:ClearAllChildren() end)
-    end
+    -- SpawnedCharacters SENGAJA TIDAK DISENTUH.
+    --
+    -- Dulu folder ini dikosongkan dengan ClearAllChildren. Itu ternyata
+    -- membuang SELURUH NPC dunia -- terukur 8 model ber-Humanoid sekaligus
+    -- (Frog Baddie, Histora Reissa, Touki, ...) -- dan karena sapuPeta diulang
+    -- tiap 30 detik, NPC yang muncul lagi langsung dihapus lagi. Gejalanya
+    -- persis seperti game yang rusak: "semua NPC ilang" dan tidak pernah balik
+    -- sampai rejoin.
+    --
+    -- Yang dibeli dari penghapusan itu pun nol: lihat catatan di bawah, 13.958
+    -- instance LeaderBoards cuma mengubah 231 -> 225 fps.
 
     local map = workspace:FindFirstChild("Map")
     if map then
@@ -2614,20 +2629,36 @@ local function jalankanBoost()
     if Config.BuangGui then
         langkah("gui", function()
             -- DAFTAR BUANG, bukan daftar simpan. Apa pun yang tidak disebut di
-            -- sini DIPERTAHANKAN -- arah gagal yang benar: melewatkan satu GUI
-            -- berarti kehilangan sedikit penghematan, bukan mematikan fitur.
+            -- sini DIPERTAHANKAN.
+            --
+            -- DIPANGKAS BESAR-BESARAN 2026-08-28. Daftar lama berisi 30 nama,
+            -- termasuk SELURUH toko dan panel hadiah. Akibatnya nyata: dengan
+            -- boost menyala, menekan prompt NPC upgrade tidak memunculkan apa
+            -- pun, karena UpgradesStoreGUI sudah dihancurkan dan Frame yang
+            -- dihancurkan tidak pernah dibuat ulang tanpa rejoin. Toko, sell,
+            -- quest, daily, rebirth, trading -- semuanya ikut mati diam-diam.
+            --
+            -- JUJUR SOAL UNTUNG-RUGINYA. Terukur di dunia hidup: panel seperti
+            -- UpgradesStoreGUI, StoreGUI, SettingsGUI semuanya sudah
+            -- `Visible = false` selama tidak dibuka, dan Frame tak terlihat
+            -- tidak dirender -- jadi secara waktu gambar seharusnya nol.
+            -- TAPI tabel pengukuran di header menggabungkan "animasi & GUI"
+            -- dalam satu baris (84,8 -> 115,4 fps), jadi bagian GUI-nya
+            -- TIDAK PERNAH diukur sendirian dan angka itu tidak boleh
+            -- dibebankan ke sini. Yang pasti terukur cuma jumlah instance
+            -- PlayerGui turun 35.110 -> 5.314, dan di proyek ini jumlah
+            -- instance sudah terbukti bukan penentu FPS.
+            --
+            -- Karena untungnya tidak terbukti sementara ruginya terbukti
+            -- (semua toko mati), dipilih sisi yang menjaga toko tetap hidup.
+            --
+            -- Sisanya cuma layar sekali-tayang yang tidak punya prompt maupun
+            -- tombol untuk dipanggil lagi.
             --
             -- FishAction SENGAJA tidak ada di daftar: runtime mancing milik game
             -- membacanya, dan membuangnya mematikan auto fish.
             local BUANG = {
-                "SettingsGUI", "IndexWorldGUI", "StoreGUI", "GemStoreGUI",
-                "UpgradesStoreGUI", "FishingStoreGUI", "ClanGUI", "BoostsStoreGUI",
-                "SecretStoreGUI", "SecretStore2GUI", "SellGUI", "QuestGUI",
-                "CaseGUI", "CaseActions", "CaseOdds", "CaseOdds2", "DailyGUI",
-                "MedalGUI", "PlaytimeRewardsGUI", "RebirthGUI", "GiftGUI",
-                "CutsceneGUI", "IntroGUI", "ConfirmationGUI", "Sacrifice1GUI",
-                "Sacrifice2GUI", "SacrificeStartGUI", "WikiGUI", "TradingGUI",
-                "ColorPickerGuild",
+                "IntroGUI", "CutsceneGUI",
             }
             local pg = game:GetService("Players").LocalPlayer:FindFirstChild("PlayerGui")
             local mg = pg and pg:FindFirstChild("MainGui")
