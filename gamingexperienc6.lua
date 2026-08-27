@@ -284,6 +284,26 @@ local Config = {
     -- lebih suka mengambilnya sendiri di waktu yang mereka pilih.
     KlaimHarian = pilihSaklar("KlaimHarian", true),
 
+    -- ==== PUNGUT GEM EVENT ====
+    -- Sengaja TANPA tombol panel: event yang menjatuhkan gem itu langka dan
+    -- tidak pernah terundi sendiri, jadi saklar yang perlu diklik justru akan
+    -- ketinggalan saat event benar-benar datang. Nyala terus, murah, dan tidak
+    -- bisa merugikan.
+    AutoGem   = pilihSaklar("AutoGem", true),
+
+    -- ==== LAPORAN DISCORD ====
+    -- PERINGATAN: URL ini adalah KREDENSIAL. Siapa pun yang membacanya bisa
+    -- mengirim apa saja ke kanalmu. Script ini terbit di repo publik, jadi
+    -- anggap URL-nya bocor sejak hari pertama dan siapkan diri untuk
+    -- menggantinya (Discord: Integrations -> Webhooks -> ganti URL).
+    -- Bisa ditimpa lewat getgenv().MozeFishConfig.Webhook kalau mau URL
+    -- berbeda per pemakai tanpa menyunting berkas.
+    Webhook = (type(U.Webhook) == "string" and U.Webhook)
+        or "https://discord.com/api/webhooks/1542380727969128530/REJU327QD30xltATNcv0Dn8TjXKzcKwNyYTWFqugYK_DllLn6Pv1NGvPnS2NiQFTBxVI",
+    -- Ambang bawah, mengikuti nama di Constants.RarityOrder.
+    WebhookMinRarity = U.WebhookMinRarity or "Ancient",
+    JedaGem   = tonumber(U.JedaGem) or 2,
+
     -- ==== BOOST FPS ====
     -- Sasarannya perangkat yang menjalankan banyak klien sekaligus.
     -- DEFAULT MATI, dan sengaja. Boost itu SATU ARAH: texture dan GUI yang
@@ -618,6 +638,263 @@ end
 -- tidak ditemukan di Constants. Jadi skor ini mengukur LAJU, bukan uang. Kolam
 -- yang memaksa rarity tinggi (PONDAREA7, God 100%) karena itu ditangani
 -- terpisah sebagai kelas prioritas, bukan lewat skor.
+
+
+-- =========================================================================
+-- LAPORAN TANGKAPAN LANGKA KE DISCORD
+--
+-- Hanya rarity ANCIENT KE ATAS yang dikirim. Urutannya diambil dari
+-- Constants.RarityOrder saat jalan, bukan ditulis mati -- kalau developer
+-- menambah rarity baru di atas Ancient, ia ikut terkirim tanpa disentuh:
+--
+--   1 Common      6 Mythical   11 Divine     16 Omniscient
+--   2 Uncommon    7 Cosmic     12 Supreme    17 Exclusive
+--   3 Rare        8 Secret     13 Celestial
+--   4 Epic        9 Rainbow    14 Ancient   <- ambang
+--   5 Legendary  10 Ascended   15 God
+--
+-- SEBERAPA JARANG: dalam 216 tangkapan berturut-turut yang diukur di akun uji,
+-- TIDAK SATU PUN mencapai Ancient. Tertinggi yang muncul Ascended (peringkat 10)
+-- sebanyak 3 kali. Jadi kanal ini akan sunyi berhari-hari, dan itu memang
+-- tujuannya -- tidak perlu penjaga laju yang rumit.
+--
+-- TIDAK ADA GAMBAR KARAKTER, DAN ITU BUKAN KELALAIAN.
+-- Karakter di game ini disimpan sebagai Model 3D di
+-- ReplicatedStorage.Assets.Characters.<Rarity>.<Nama> -- tidak ada art 2D di
+-- mana pun. Diuji: thumbnail Roblox untuk mesh-nya membalas state "Completed"
+-- tapi URL CDN-nya 404 dengan badan JSON error (aset 2D biasa berhasil, jadi
+-- yang gagal memang khusus mesh). Kalau nanti mau ada gambar, isi PETA_GAMBAR
+-- di bawah dengan URL yang kamu hosting sendiri.
+local Webhook = { terkirim = 0, gagal = 0, dilewati = 0, pesanGalat = "" }
+
+-- Potret 24 karakter Ancient ke atas. Dibuat sendiri, karena game ini tidak
+-- menyimpan art 2D di mana pun: model 3D-nya dirender ke ViewportFrame lalu
+-- dipotret, dibidik ke part Head dari arah LookVector-nya.
+--
+-- Kenapa cuma 24: hanya rarity Ancient ke atas yang memicu webhook, dan
+-- seluruh game hanya punya 24 karakter di tingkat itu. Daftarnya tetap.
+local BASE = "https://mozenian.github.io/framegenerator/char/"
+local PETA_GAMBAR = {
+    ["Ada Smasher"] = BASE .. "Ada_Smasher.png",
+    ["Aemira"] = BASE .. "Aemira.png",
+    ["Almira Eye"] = BASE .. "Almira_Eye.png",
+    ["Angelia"] = BASE .. "Angelia.png",
+    ["Astra"] = BASE .. "Astra.png",
+    ["Changlia"] = BASE .. "Changlia.png",
+    ["Darkfire"] = BASE .. "Darkfire.png",
+    ["Elfaria"] = BASE .. "Elfaria.png",
+    ["Emeliara"] = BASE .. "Emeliara.png",
+    ["Exalia"] = BASE .. "Exalia.png",
+    ["Froza"] = BASE .. "Froza.png",
+    ["Girlyfang"] = BASE .. "Girlyfang.png",
+    ["Griffina"] = BASE .. "Griffina.png",
+    ["Guthia"] = BASE .. "Guthia.png",
+    ["Kaneko II"] = BASE .. "Kaneko_II.png",
+    ["Kira Ho"] = BASE .. "Kira_Ho.png",
+    ["Limitless Goja"] = BASE .. "Limitless_Goja.png",
+    ["Nekopura II"] = BASE .. "Nekopura_II.png",
+    ["Rimura Tempesta"] = BASE .. "Rimura_Tempesta.png",
+    ["Riyo Reaper"] = BASE .. "Riyo_Reaper.png",
+    ["Ronova"] = BASE .. "Ronova.png",
+    ["Rora Mercuri"] = BASE .. "Rora_Mercuri.png",
+    ["Yang"] = BASE .. "Yang.png",
+    ["Yin"] = BASE .. "Yin.png",
+}
+
+-- Warna embed mengikuti rarity supaya sekilas terlihat seberapa besar.
+local WARNA = {
+    Ancient = 0xC77B2E, God = 0xF2C230, Omniscient = 0x9B4DFF, Exclusive = 0xFF3B6B,
+    Celestial = 0x4FC3F7, Supreme = 0xE04FD0, Divine = 0xFFE082, Ascended = 0x7CE0A3,
+}
+
+-- Constants.RarityOrder memetakan ANGKA -> NAMA (RO[14] = "Ancient"), bukan
+-- sebaliknya. Membacanya sebagai RO.Ancient menghasilkan nil, dan perbandingan
+-- ambangnya lalu gagal diam-diam -- modul lolos compile, jalan tanpa error, dan
+-- tidak pernah mengirim satu pun laporan. Karena itu petanya DIBALIK di sini.
+local function urutanRarity()
+    local ok, C = pcall(function()
+        return require(game:GetService("ReplicatedStorage"):WaitForChild("Constants", 5))
+    end)
+    if not (ok and type(C) == "table" and type(C.RarityOrder) == "table") then return nil end
+    local balik = {}
+    for angka, nama in pairs(C.RarityOrder) do
+        if type(nama) == "string" then balik[nama] = tonumber(angka) end
+    end
+    return (next(balik) ~= nil) and balik or nil
+end
+
+local function kirimDiscord(isi)
+    local req = (type(request) == "function" and request)
+        or (type(http_request) == "function" and http_request)
+        or (syn and syn.request) or (fluxus and fluxus.request)
+    if not req then
+        Webhook.gagal = Webhook.gagal + 1
+        Webhook.pesanGalat = "executor tanpa fungsi request"
+        return false
+    end
+    local ok, res = pcall(function()
+        return req({
+            Url = Config.Webhook,
+            Method = "POST",
+            Headers = { ["Content-Type"] = "application/json" },
+            Body = game:GetService("HttpService"):JSONEncode(isi),
+        })
+    end)
+    if not ok then
+        Webhook.gagal = Webhook.gagal + 1
+        Webhook.pesanGalat = tostring(res):sub(1, 70)
+        return false
+    end
+    local kode = res and (res.StatusCode or res.Status) or 0
+    -- Discord membalas 204 tanpa badan kalau berhasil.
+    if kode == 204 or kode == 200 then
+        Webhook.terkirim = Webhook.terkirim + 1
+        return true
+    end
+    Webhook.gagal = Webhook.gagal + 1
+    Webhook.pesanGalat = "HTTP " .. tostring(kode)
+    return false
+end
+
+local function laporkan(hadiah)
+    local nama = tostring(hadiah.name or "?")
+    local rarity = tostring(hadiah.rarity or "?")
+    local mutasi = tostring(hadiah.typeName or "")
+    local pemain = game:GetService("Players").LocalPlayer.Name
+
+    local kolom = {
+        { name = "Character", value = "**" .. nama .. "**", inline = true },
+        { name = "Rarity",    value = rarity,               inline = true },
+        { name = "Player",    value = pemain,               inline = true },
+    }
+    if mutasi ~= "" then
+        table.insert(kolom, { name = "Mutation", value = mutasi, inline = true })
+    end
+    -- Peluang jauh lebih berkesan sebagai "1 dari N" daripada persen berkoma.
+    local p = tonumber(hadiah.chancePercent)
+    if p and p > 0 then
+        table.insert(kolom, { name = "Chance", value = string.format("1 in %s",
+            (function()
+                local n = math.floor(100 / p + 0.5)
+                local s = tostring(n)
+                local hasil = ""
+                while #s > 3 do
+                    hasil = "," .. string.sub(s, -3) .. hasil
+                    s = string.sub(s, 1, -4)
+                end
+                return s .. hasil
+            end)()), inline = true })
+    end
+    local cps = tonumber(hadiah.cps)
+    if cps then
+        table.insert(kolom, { name = "CPS", value = "$" .. tostring(math.floor(cps)) .. "/s", inline = true })
+    end
+
+    local embed = {
+        title = "Character Obtained",
+        color = WARNA[rarity] or 0xB91C1C,
+        fields = kolom,
+        footer = { text = "Fish an Anime RNG | Mozeframe" },
+    }
+    local gbr = PETA_GAMBAR[nama]
+    if gbr then embed.thumbnail = { url = gbr } end
+
+    kirimDiscord({ username = "Mozeframe", embeds = { embed } })
+end
+
+local function pasangWebhook()
+    if type(Config.Webhook) ~= "string" or Config.Webhook == "" then return end
+    local RO = urutanRarity()
+    if not RO then
+        Webhook.pesanGalat = "Constants.RarityOrder tidak terbaca"
+        return
+    end
+    local ambang = RO[Config.WebhookMinRarity] or RO.Ancient or 14
+
+    local State = game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("FishingState")
+    S.conn[#S.conn + 1] = State.OnClientEvent:Connect(function(d)
+        if typeof(d) ~= "table" or tostring(d.kind) ~= "Completed" then return end
+        if type(d.rewards) ~= "table" then return end
+        -- rewards itu ARRAY: satu tarikan bisa memberi beberapa karakter
+        -- sekaligus (multi-pull), dan tiap butir dinilai sendiri.
+        for _, hadiah in pairs(d.rewards) do
+            if type(hadiah) == "table" and hadiah.rarity then
+                local peringkat = RO[tostring(hadiah.rarity)]
+                if peringkat and peringkat >= ambang then
+                    task.spawn(function() pcall(laporkan, hadiah) end)
+                else
+                    Webhook.dilewati = Webhook.dilewati + 1
+                end
+            end
+        end
+    end)
+    catat("webhook aktif, ambang %s ke atas", tostring(Config.WebhookMinRarity))
+end
+
+-- =========================================================================
+-- PUNGUT GEM EVENT
+--
+-- Sebagian event menjatuhkan gem dari langit. Terbaca dari Constants:
+--
+--   TypeEvents.Events["Hell's Gates"].Gem = { RewardGems=100, SpawnEverySeconds=3,
+--       SpawnHeight=150, SpawnRadius=200, FallSpeed=170, MaxAlive=100,
+--       LifetimeSeconds=420 }
+--
+-- Setelan yang sama dipakai event "S U B  Z E R O". Satu butir 100 gem, muncul
+-- tiap 3 detik selama event -- sekitar 20.000 gem per event 10 menit kalau
+-- semuanya terpungut.
+--
+-- CARA MEMUNGUTNYA, DAN KENAPA JARAK TIDAK PENTING.
+-- Butirnya BasePart bernama "Gem", anak langsung Workspace, Anchored=true,
+-- CanCollide=false, CanTouch=true, dan membawa TouchInterest. Jadi ia dipungut
+-- lewat SENTUHAN -- dan sentuhan bisa dipalsukan tanpa mendekat.
+--
+-- TERUKUR di akun sungguhan saat event Hell's Gates berjalan:
+--   satu butir di jarak 349 stud -> firetouchinterest -> +100 gem, butir lenyap
+--   sapuan 45 detik -> 97 butir, +9.840 gem, 0 gagal
+--
+-- Karena itu fitur ini TIDAK memindahkan karakter sama sekali, berbeda dari
+-- ide auto-teleport yang sudah dibuang.
+--
+-- DEFAULT NYALA: memungut tidak bisa merugikan. Yang tidak diambil justru
+-- hangus sendiri sesudah LifetimeSeconds.
+local Gem = { dipungut = 0, gagal = 0, terakhirAda = 0 }
+
+local function sapuGem()
+    if type(firetouchinterest) ~= "function" then return end
+    local pemain = game:GetService("Players").LocalPlayer
+    local hrp = pemain.Character and pemain.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    -- GetChildren, BUKAN GetDescendants: butirnya selalu anak langsung Workspace,
+    -- dan menyapu 25 ribu turunan tiap dua detik itu boros di jalur yang juga
+    -- dipakai mancing.
+    local ada = 0
+    for _, d in ipairs(workspace:GetChildren()) do
+        if d:IsA("BasePart") and d.Name == "Gem" and d.Parent then
+            ada = ada + 1
+            local ok = pcall(function()
+                firetouchinterest(hrp, d, 0)
+                firetouchinterest(hrp, d, 1)
+            end)
+            if ok then Gem.dipungut = Gem.dipungut + 1 else Gem.gagal = Gem.gagal + 1 end
+        end
+    end
+    Gem.terakhirAda = ada
+end
+
+local function jagaGem()
+    -- Ditunda: saat script baru dimuat, karakter sering belum ada.
+    task.wait(5)
+    while S.hidup do
+        if Config.AutoGem then pcall(sapuGem) end
+        -- 2 detik sudah rapat: butir hidup 420 detik dan maksimal 100 sekaligus,
+        -- jadi tidak ada yang sempat hangus. Lebih rapat cuma memakan waktu di
+        -- jalur yang sama dengan mancing tanpa menambah hasil.
+        task.wait(Config.JedaGem)
+    end
+end
+
 -- =========================================================================
 -- AUTO KLAIM: PLAYTIME REWARDS, QUEST, HADIAH HARIAN
 --
@@ -751,10 +1028,16 @@ local Kolam = {
 
 -- Urutan rarity dari rendah ke tinggi. Dipakai HANYA untuk memutuskan apakah
 -- sebuah kolam layak masuk kelas prioritas -- bukan untuk menaksir harga.
+-- Urutan RESMI, disalin dari Constants.RarityOrder. Tabel sebelumnya di sini
+-- dikarang dari ingatan dan SALAH di lima tempat (Secret dan Rainbow tertukar,
+-- Supreme/Celestial tertukar, God dan Omniscient tertukar, Exclusive hilang).
+-- Itu dipakai memutuskan kolam mana yang masuk kelas prioritas, jadi salahnya
+-- tidak kelihatan sampai kolam event benar-benar muncul.
 local URUT_RARITY = {
     Common = 1, Uncommon = 2, Rare = 3, Epic = 4, Legendary = 5, Mythical = 6,
-    Cosmic = 7, Rainbow = 8, Secret = 9, Ascended = 10, Divine = 11,
-    Celestial = 12, Ancient = 13, Supreme = 14, Omniscient = 15, God = 16,
+    Cosmic = 7, Secret = 8, Rainbow = 9, Ascended = 10, Divine = 11,
+    Supreme = 12, Celestial = 13, Ancient = 14, God = 15, Omniscient = 16,
+    Exclusive = 17,
 }
 
 local function konstanta()
@@ -2063,6 +2346,8 @@ end)
 
 task.spawn(jagaKolam)
 task.spawn(jagaKlaim)
+task.spawn(jagaGem)
+task.spawn(pasangWebhook)
 
 -- Mulai sendiri, jangan menunggu dipancing dari luar.
 --
@@ -2103,6 +2388,11 @@ getgenv().MozeFishInfo = function()
         pondPilihan = Kolam.pilihan,
         pondAlasan  = Kolam.alasan,
         kekuatanRod = Kolam.kekuatan,
+        webhook     = (Config.Webhook ~= "") and { terkirim = Webhook.terkirim,
+                        gagal = Webhook.gagal, dilewati = Webhook.dilewati,
+                        pesanGalat = Webhook.pesanGalat ~= "" and Webhook.pesanGalat or nil } or false,
+        gem         = Config.AutoGem and { dipungut = Gem.dipungut, gagal = Gem.gagal,
+                                              adaSekarang = Gem.terakhirAda } or false,
         klaim       = Config.AutoKlaim and {
             playtime = Klaim.playtime, quest = Klaim.quest,
             harian = Klaim.harian, galat = Klaim.galat,
