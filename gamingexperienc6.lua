@@ -353,6 +353,9 @@ local Config = {
     -- Matikan kalau tidak mau script menulis berkas apa pun.
     Simpan = pilihSaklar("Simpan", true),
 
+    -- Nyalakan hanya saat mencari masalah: getgenv().MozeFishConfig.Senyap = false
+    Senyap = U.Senyap ~= false,
+
     Gui = U.Gui ~= false,   -- panel kecil di kanan atas
 }
 
@@ -444,7 +447,16 @@ local S = {
     conn        = {},
 }
 
+-- Senyap secara bawaan: 19 tempat memanggil ini, dan sebagian di dalam loop
+-- yang jalan tiap beberapa detik -- di layar dengan 8-10 klien itu membanjiri
+-- konsol sampai pesan game sendiri tidak terbaca.
+--
+-- Dua warn fatal di bawah SENGAJA tidak ikut dibungkam: keduanya menyala tepat
+-- sekali, hanya saat script tidak bisa jalan sama sekali. Membungkamnya berarti
+-- script mati tanpa meninggalkan satu pun jejak -- persis kelas bug yang paling
+-- lama dikejar di proyek ini.
 local function catat(fmt, ...)
+    if Config.Senyap then return end
     print("[MozeFish] " .. string.format(fmt, ...))
 end
 
@@ -1103,7 +1115,7 @@ local Webhook = { terkirim = 0, gagal = 0, dilewati = 0, pesanGalat = "" }
 --
 -- Kenapa cuma 24: hanya rarity Ancient ke atas yang memicu webhook, dan
 -- seluruh game hanya punya 24 karakter di tingkat itu. Daftarnya tetap.
-local BASE = "https://mozenian.github.io/framegenerator/char/"
+local BASE = "https://mozenian.github.io/framegenerator/ikon_karakter/"
 local PETA_GAMBAR = {
     ["Ada Smasher"] = BASE .. "Ada_Smasher.png",
     ["Aemira"] = BASE .. "Aemira.png",
@@ -1197,9 +1209,10 @@ local function laporkan(hadiah)
         { name = "Rarity",    value = rarity,               inline = true },
         { name = "Player",    value = pemain,               inline = true },
     }
-    if mutasi ~= "" then
-        table.insert(kolom, { name = "Mutation", value = mutasi, inline = true })
-    end
+    -- SELALU ada, walau kosong. Kolom yang kadang muncul kadang tidak membuat
+    -- tata letak embed melompat antar laporan, dan pembaca jadi ragu apakah
+    -- karakternya memang polos atau datanya yang hilang.
+    table.insert(kolom, { name = "Mutation", value = (mutasi ~= "" and mutasi) or "-", inline = true })
     -- Peluang jauh lebih berkesan sebagai "1 dari N" daripada persen berkoma.
     local p = tonumber(hadiah.chancePercent)
     if p and p > 0 then
