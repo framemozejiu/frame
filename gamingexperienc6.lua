@@ -259,6 +259,39 @@ local Config = {
     -- script bisa membatalkan selamanya dan MALAH tidak menangkap apa pun.
     MaksTolakBeruntun = tonumber(U.MaksTolakBeruntun) or 25,
 
+    -- ==== MODE BLATANT ====
+    -- Mencabut pengaman anti-loop: roll ditolak terus sampai dapat yang bagus,
+    -- tanpa batas beruntun. Lebih cepat, tapi juga jauh lebih kentara dari luar
+    -- -- tali dan pelampung berkedip terus-menerus di layar pemain lain.
+    --
+    -- DEFAULT MATI. Pengaman 25-beruntun itu ada karena alasan nyata: kalau
+    -- server berhenti mengacak dan selalu mengirim angka besar, tanpa batas
+    -- script membatalkan SELAMANYA dan tidak menangkap apa pun.
+    Blatant = pilihSaklar("Blatant", false),
+
+    -- ==== PILIH KOLAM OTOMATIS ====
+    -- Menilai semua kolam yang kekuatan rod-nya cukup, lalu pindah ke yang
+    -- terbaik. DEFAULT MATI: ia memindahkan karakter tanpa diminta, dan itu
+    -- tidak boleh terjadi diam-diam.
+    AutoPindahPond  = pilihSaklar("AutoPindahPond", false),
+    JedaPeriksaPond = tonumber(U.JedaPeriksaPond) or 20,
+    -- Sudah dianggap berada di kolam kalau sedekat ini -- tidak perlu teleport.
+    RadiusKolam     = tonumber(U.RadiusKolam) or 60,
+    -- Kolam yang MEMAKSA rarity ini ke atas selalu menang atas skor laju.
+    RarityPrioritas = U.RarityPrioritas or "Mythical",
+    -- Isi nama kolam untuk mengunci pilihan dan melewati penilaian.
+    PondPaksa       = U.PondPaksa,
+
+    -- ==== AUTO KLAIM ====
+    -- DEFAULT NYALA, berbeda dari boost dan auto pindah kolam. Alasannya:
+    -- mengklaim tidak bisa menghilangkan apa pun -- hadiah yang tidak diambil
+    -- justru yang hangus. Tidak ada sisi buruk yang perlu dilindungi saklar.
+    AutoKlaim   = pilihSaklar("AutoKlaim", true),
+    JedaKlaim   = tonumber(U.JedaKlaim) or 60,
+    -- Hadiah harian dipisah: ia terikat hari, bukan sesi, dan sebagian orang
+    -- lebih suka mengambilnya sendiri di waktu yang mereka pilih.
+    KlaimHarian = pilihSaklar("KlaimHarian", true),
+
     -- ==== BOOST FPS ====
     -- Sasarannya perangkat yang menjalankan banyak klien sekaligus.
     -- DEFAULT MATI, dan sengaja. Boost itu SATU ARAH: texture dan GUI yang
@@ -302,6 +335,10 @@ local function tulisSimpanan()
             TolakRoll  = Config.TolakRoll,
             AmbangRoll = Config.AmbangRoll,
             BoostFps   = Config.BoostFps,
+            Blatant    = Config.Blatant,
+            AutoPindahPond = Config.AutoPindahPond,
+            AutoKlaim  = Config.AutoKlaim,
+            KlaimHarian = Config.KlaimHarian,
         }))
     end)
 end
@@ -504,12 +541,442 @@ local function hitungAmbang()
     return math.max(Config.AmbangMin, math.min(Config.AmbangMaks, t))
 end
 
+-- =========================================================================
+-- KOLAM: PENALAAN PER KOLAM DAN PINDAH OTOMATIS
+--
+-- Semua angka di sini DIBACA dari Constants.Fishing saat jalan, tidak satu pun
+-- ditulis mati. Itu disengaja: kalau developer menyeimbangkan ulang kolam atau
+-- menambah kolam event, script ikut menyesuaikan tanpa disentuh.
+--
+-- YANG TERUKUR DARI CONSTANTS (akun uji, Void Rod):
+--
+--   PONDAREA1   Strength 0      PondCatchTimeMulti 0 .. 0      -> tunggu NOL
+--   PONDAREA2   Strength 2000   PondCatchTimeMulti nil .. 0,8  -> tunggu 0,8-8 dtk
+--   PONDAREA7   Strength 1      PondCatchTime {Min 1, Max 5}   RarityChances {God=100}
+--
+-- PONDAREA1 waktu tangkapnya benar-benar NOL. Itu sebabnya di sana terasa
+-- instan, dan sekaligus sebabnya tolak-roll nyaris tak berguna di sana: tidak
+-- ada waktu tunggu yang bisa dihemat.
+--
+-- PONDAREA2 membeli mutasi (Lava x4) dan multi-pull (x1,5 / x2) DENGAN waktu.
+-- Untuk Void Rod harapan karakter per tangkapan cuma naik 1,144 -> 1,186
+-- (+3,7%) sementara waktu tangkap naik dari nol ke hitungan detik. Karena itu
+-- penilai di bawah memakai KARAKTER PER DETIK, bukan per tangkapan.
+--
+-- YANG TIDAK MASUK MODEL, DAN HARUS DISADARI:
+-- Harga tiap rarity dan tiap mutasi TIDAK ikut dihitung -- tabel pengalinya
+-- tidak ditemukan di Constants. Jadi skor ini mengukur LAJU, bukan uang. Kolam
+-- yang memaksa rarity tinggi (PONDAREA7, God 100%) karena itu ditangani
+-- terpisah sebagai kelas prioritas, bukan lewat skor.
+-- =========================================================================
+-- AUTO KLAIM: PLAYTIME REWARDS, QUEST, HADIAH HARIAN
+--
+-- Ketiganya menumpuk sendiri selama script jalan berjam-jam, dan semuanya
+-- hangus kalau tidak diambil. Tidak ada yang bisa hilang dengan mengklaim --
+-- karena itu fitur ini DEFAULT NYALA, berbeda dari boost dan auto pindah kolam
+-- yang default mati karena efeknya tidak bisa dibatalkan.
+--
+-- BENTUK DATA, TERBACA LANGSUNG DARI SERVER (bukan tebakan):
+--
+--   GetPlaytimeRewardsState -> { rewardStates = { [i] = {ready, claimed, remaining} },
+--                                waitSecondsByReward, claimedMask, totalRewards }
+--   QuestGetState           -> { totalCompleted, quests = { [i] = {claimable, id, title, ...} } }
+--   GetDailyRewardsState    -> { totalDays, unlockedDay, claimedMask, timer }
+--
+-- TERUKUR: ClaimPlaytimeReward:InvokeServer(6) mengubah claimedMask 31 -> 63
+-- dan rewardStates[6] jadi claimed=true. Jadi tanda tangannya memang indeks
+-- angka, bukan id atau tabel.
+--
+-- BELUM TERUJI: QuestClaimAll. Saat diperiksa tidak ada satu pun quest yang
+-- claimable, jadi jalur itu tidak pernah benar-benar dijalankan. Ia dibungkus
+-- pcall dan kegagalannya dicatat, bukan didiamkan -- kalau tanda tangannya
+-- ternyata beda, itu akan terlihat di log alih-alih hilang.
+local Klaim = { playtime = 0, quest = 0, harian = 0, galat = 0, pesanGalat = "" }
+
+local function remotes()
+    local ok, R = pcall(function()
+        return game:GetService("ReplicatedStorage"):WaitForChild("Remotes", 5)
+    end)
+    return ok and R or nil
+end
+
+-- Tiap bagian dibungkus pcall SENDIRI. Satu pcall besar membuat kegagalan di
+-- playtime ikut membatalkan quest dan harian, dan gejalanya "auto klaim tidak
+-- jalan" tanpa satu pun keterangan bagian mana yang bermasalah.
+local function langkahKlaim(nama, f)
+    local ok, err = pcall(f)
+    if not ok then
+        Klaim.galat = Klaim.galat + 1
+        Klaim.pesanGalat = nama .. ": " .. tostring(err):sub(1, 60)
+        catat("klaim/%s gagal: %s", nama, tostring(err):sub(1, 60))
+    end
+    return ok
+end
+
+local function klaimPlaytime(R)
+    local st = R.GetPlaytimeRewardsState:InvokeServer()
+    if type(st) ~= "table" or type(st.rewardStates) ~= "table" then return end
+    for i, r in pairs(st.rewardStates) do
+        if type(r) == "table" and r.ready and not r.claimed then
+            R.ClaimPlaytimeReward:InvokeServer(i)
+            Klaim.playtime = Klaim.playtime + 1
+            catat("klaim playtime #%s", tostring(i))
+            -- Jeda kecil antar klaim: server memperbarui state-nya sendiri, dan
+            -- menembak beruntun tanpa jeda pernah membuat klaim kedua mengenai
+            -- keadaan yang belum sempat berubah.
+            task.wait(0.35)
+        end
+    end
+end
+
+local function klaimQuest(R)
+    local qs = R.QuestGetState:InvokeServer()
+    if type(qs) ~= "table" or type(qs.quests) ~= "table" then return end
+    local bisa = 0
+    for _, q in pairs(qs.quests) do
+        if type(q) == "table" and q.claimable then bisa = bisa + 1 end
+    end
+    if bisa == 0 then return end
+    -- ClaimAll didahulukan: satu panggilan untuk semua. Kalau ia gagal, jatuh
+    -- ke klaim satu per satu -- lebih berisik tapi tidak ikut mati.
+    local ok = pcall(function() R.QuestClaimAll:InvokeServer() end)
+    if not ok then
+        for _, q in pairs(qs.quests) do
+            if type(q) == "table" and q.claimable and q.id then
+                pcall(function() R.QuestClaim:InvokeServer(q.id) end)
+                task.wait(0.3)
+            end
+        end
+    end
+    Klaim.quest = Klaim.quest + bisa
+    catat("klaim %d quest", bisa)
+end
+
+local function klaimHarian(R)
+    local ds = R.GetDailyRewardsState:InvokeServer()
+    if type(ds) ~= "table" then return end
+    local hari = tonumber(ds.unlockedDay)
+    local mask = tonumber(ds.claimedMask) or 0
+    if not hari or hari < 1 then return end
+    -- claimedMask itu bitmask: bit ke-(hari-1) menyala berarti sudah diambil.
+    local bit = 2 ^ (hari - 1)
+    if math.floor(mask / bit) % 2 == 1 then return end
+    R.ClaimDailyReward:InvokeServer(hari)
+    Klaim.harian = Klaim.harian + 1
+    catat("klaim hadiah harian #%d", hari)
+end
+
+local function klaimSekali()
+    local R = remotes()
+    if not R then return end
+    langkahKlaim("playtime", function() klaimPlaytime(R) end)
+    langkahKlaim("quest", function() klaimQuest(R) end)
+    if Config.KlaimHarian then
+        langkahKlaim("harian", function() klaimHarian(R) end)
+    end
+end
+
+local function jagaKlaim()
+    -- Ditunda sebentar di awal: saat script baru dimuat, Remotes dan state
+    -- pemain sering belum siap, dan klaim pertama akan gagal tanpa sebab.
+    task.wait(8)
+    while S.hidup do
+        if Config.AutoKlaim then pcall(klaimSekali) end
+        task.wait(Config.JedaKlaim)
+    end
+end
+
+-- Script ini tidak punya variabel LocalPlayer di scope berkas -- tiap tempat
+-- mengambilnya sendiri. Modul ini ikut begitu supaya tidak bergantung pada
+-- urutan deklarasi di luar dirinya.
+local PemainLokal = game:GetService("Players").LocalPlayer
+
+local Kolam = {
+    ukur = {},          -- nama -> {n, jum} waktu tunggu SUNGGUHAN
+    pilihan = nil,      -- nama kolam yang sedang dituju
+    alasan = "",        -- ditampilkan di MozeFishInfo
+    skor = {},          -- nama -> rincian, untuk panel
+    kekuatan = 0,
+}
+
+-- Urutan rarity dari rendah ke tinggi. Dipakai HANYA untuk memutuskan apakah
+-- sebuah kolam layak masuk kelas prioritas -- bukan untuk menaksir harga.
+local URUT_RARITY = {
+    Common = 1, Uncommon = 2, Rare = 3, Epic = 4, Legendary = 5, Mythical = 6,
+    Cosmic = 7, Rainbow = 8, Secret = 9, Ascended = 10, Divine = 11,
+    Celestial = 12, Ancient = 13, Supreme = 14, Omniscient = 15, God = 16,
+}
+
+local function konstanta()
+    local ok, C = pcall(function()
+        return require(game:GetService("ReplicatedStorage"):WaitForChild("Constants", 5))
+    end)
+    if ok and type(C) == "table" and type(C.Fishing) == "table" then return C.Fishing end
+    return nil
+end
+
+-- Yang menentukan bukan rod di tangan melainkan rod TERKUAT yang dimiliki:
+-- Strength memutuskan kolam mana yang boleh dimasuki, dan pemain bisa saja
+-- sedang memegang rod lemah tanpa sadar.
+local function rodTerkuat(F)
+    local terbaik, kuat = nil, 0
+    local function periksa(alat)
+        if not alat or not alat.Name then return end
+        local s = tonumber(alat:GetAttribute("RodStrength"))
+        if not s then
+            local cfg = F.Rods and F.Rods[alat.Name]
+            s = cfg and tonumber(cfg.Strength)
+        end
+        if s and s > kuat then terbaik, kuat = alat.Name, s end
+    end
+    for _, v in ipairs(PemainLokal.Backpack:GetChildren()) do periksa(v) end
+    if PemainLokal.Character then
+        for _, v in ipairs(PemainLokal.Character:GetChildren()) do
+            if v:IsA("Tool") then periksa(v) end
+        end
+    end
+    return terbaik, kuat
+end
+
+local function rerata(t, bawaan)
+    if type(t) ~= "table" then return bawaan end
+    local mn, mx = tonumber(t.Min), tonumber(t.Max)
+    if mn and mx then return (mn + mx) / 2 end
+    return bawaan
+end
+
+-- Harapan jumlah karakter per tangkapan, sesudah pengali kolam diterapkan.
+local function harapanTarikan(rodCfg, pondCfg)
+    local dasar = (pondCfg and pondCfg.MultiPullChances) or (rodCfg and rodCfg.MultiPullChances)
+    if type(dasar) ~= "table" then return 1 end
+    local mult = pondCfg and pondCfg.MultiPullChancesMultiplier
+    local tot, jum = 0, 0
+    for k, v in pairs(dasar) do
+        local n = tonumber(k) or 1
+        local p = v * ((mult and (mult[k] or mult[n])) or 1)
+        tot = tot + p
+        jum = jum + n * p
+    end
+    return tot > 0 and (jum / tot) or 1
+end
+
+-- Waktu tunggu rata-rata di kolam ini, dalam detik.
+--
+-- HASIL UKUR SELALU MENANG ATAS TAKSIRAN, dan itu pelajaran mahal. Taksiran
+-- dari Constants sempat dipakai sendirian dan hasilnya SALAH TOTAL:
+--
+--   ditaksir   PONDAREA1 0 dtk   PONDAREA2 2,2 dtk  -> P1 delapan kali lebih baik
+--   diukur     PONDAREA1 1,09    PONDAREA2 0,952    -> P2 justru 13% lebih cepat
+--
+-- Sebabnya PondCatchTimeMulti = 0 ternyata berarti "tanpa modifier", bukan
+-- "dikali nol" -- dan yang benar-benar menentukan adalah upgrade pemain
+-- (UpgFasterCatch, QuickFish, gamepass), yang tidak ada di tabel kolam sama
+-- sekali. Jadi taksiran di bawah HANYA dipakai untuk kolam yang belum pernah
+-- dikunjungi, dan bahkan di situ ia cuma urutan kasar.
+local function taksirTunggu(rodCfg, pondCfg)
+    if type(pondCfg.PondCatchTime) == "table" then
+        return rerata(pondCfg.PondCatchTime, 3)
+    end
+    local dasar = rerata(rodCfg and rodCfg.PondCatchTime, 3)
+    local mn = tonumber(pondCfg.PondCatchTimeMultiMINIMUM) or 0
+    local mx = tonumber(pondCfg.PondCatchTimeMultiMAXIMUM)
+    if not mx then return dasar end          -- tanpa pengali: pakai milik rod
+    return dasar * ((mn + mx) / 2)
+end
+
+-- Rata-rata TERUKUR kalau sampelnya cukup, taksiran kalau belum pernah ke sana.
+-- Ambang 8 sampel: cukup untuk menstabilkan rata-rata, masih cepat terkumpul.
+local function perkiraanTunggu(rodCfg, pondCfg, nama)
+    local u = Kolam.ukur[nama]
+    if u and u.n >= 8 then return u.jum / u.n, true end
+    return taksirTunggu(rodCfg, pondCfg), false
+end
+
+-- Dipanggil dari handler Started: satu-satunya sumber angka yang benar.
+function Kolam.catatTunggu(nama, detik)
+    if not nama or type(detik) ~= "number" or detik <= 0 then return end
+    local u = Kolam.ukur[nama]
+    if not u then
+        u = { n = 0, jum = 0 }
+        Kolam.ukur[nama] = u
+    end
+    -- Jendela bergulir 60: kalau server menyeimbangkan ulang, angka lama tidak
+    -- menahan rata-rata selamanya.
+    if u.n >= 60 then
+        u.jum = u.jum * (59 / 60)
+        u.n = 59
+    end
+    u.n = u.n + 1
+    u.jum = u.jum + detik
+end
+
+-- Kolam yang MEMAKSA satu rarity tinggi (RarityChances dengan satu entri 100).
+-- Ini kelas tersendiri: kolam event seperti PONDAREA7 (God 100%) nilainya jauh
+-- di atas apa pun yang bisa dikejar dengan menghemat milidetik, dan model laju
+-- tidak bisa melihat itu karena tidak tahu harga.
+local function rarityPaksa(pondCfg)
+    local rc = pondCfg.RarityChances
+    if type(rc) ~= "table" then return nil, 0 end
+    local nama, nilai = nil, 0
+    for k, v in pairs(rc) do
+        local n = tonumber(v)
+        if n and n > nilai then nama, nilai = tostring(k), n end
+    end
+    if nama and nilai >= 100 then return nama, URUT_RARITY[nama] or 0 end
+    return nil, 0
+end
+
+-- Instance kolam yang ada di dunia, TERDEKAT dengan kita.
+--
+-- DUA PART BERBEDA, DAN MEMBEDAKANNYA ITU PENTING:
+--
+--   PONDAREA<n>    zona pemicu di atas AIR. Size.Y = 0, Transparency = 1,
+--                  CanCollide = false. Ini yang dikirim ke FishingRequestStart.
+--   TPPONDAREA<n>  penanda 1x1x1 di folder PondAreasTeleports -- titik BERDIRI
+--                  yang disediakan game, di darat, dekat dock dan papan strength.
+--
+-- Teleport ke PONDAREA sudah dicoba dan hasilnya: nyemplung ke air, lalu server
+-- memulangkan kita 549 stud dalam 3 detik. Nyawa tetap penuh, jadi itu bukan
+-- anti-cheat -- cuma jatuh ke tempat yang bukan pijakan. Karena itu tujuan
+-- teleport WAJIB memakai TPPONDAREA, sedangkan penentuan "kolam ini ada di
+-- dunia atau tidak" tetap memakai PONDAREA.
+local function partKolam(nama, untukPijakan)
+    local hrp = PemainLokal.Character and PemainLokal.Character:FindFirstChild("HumanoidRootPart")
+    local cari = untukPijakan and ("TP" .. nama) or nama
+    local dekat, jarak = nil, math.huge
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("BasePart") and d.Name == cari then
+            local j = hrp and (d.Position - hrp.Position).Magnitude or 0
+            if j < jarak then dekat, jarak = d, j end
+        end
+    end
+    -- Tidak semua kolam punya penanda TP -- kolam event mungkin tidak. Kalau
+    -- tidak ada, lebih baik tidak pindah sama sekali daripada nyemplung lagi.
+    return dekat, jarak
+end
+
+-- Menilai semua kolam yang BOLEH dimasuki, lalu mengembalikan yang terbaik.
+function Kolam.nilai()
+    local F = konstanta()
+    if not F or type(F.Ponds) ~= "table" then return nil, "Constants.Fishing tidak terbaca" end
+
+    if Config.PondPaksa and F.Ponds[Config.PondPaksa] then
+        return Config.PondPaksa, "dikunci manual"
+    end
+
+    local namaRod, kuat = rodTerkuat(F)
+    Kolam.kekuatan = kuat
+    local rodCfg = namaRod and F.Rods and F.Rods[namaRod] or nil
+
+    -- Ongkos tetap tiap siklus di luar penungguan: restart + jaringan. Diukur
+    -- terus oleh script, jadi peringkatnya ikut mengikuti koneksi sungguhan.
+    local overhead = (S.nRestart > 0) and (S.jumRestart / S.nRestart) or 0.3
+    if overhead < 0.05 then overhead = 0.05 end
+
+    local terbaik, skorTerbaik, alasan = nil, -1, ""
+    local prioritasTerbaik = -1
+    Kolam.skor = {}
+
+    for nama, cfg in pairs(F.Ponds) do
+        local perlu = tonumber(cfg.RequiredStrength) or 0
+        local part = partKolam(nama)
+        -- Kolam tanpa wujud di dunia dilewati diam-diam: PONDAREA7-12 adalah
+        -- kolam event yang cuma muncul sesekali, dan menargetkannya saat tidak
+        -- ada berarti script menembak ke tempat kosong selamanya.
+        if part and kuat >= perlu then
+            local tunggu, terukur = perkiraanTunggu(rodCfg, cfg, nama)
+            local karakter = harapanTarikan(rodCfg, cfg)
+            local skor = karakter / (tunggu + overhead)
+            local rNama, rTingkat = rarityPaksa(cfg)
+            local ambangPri = URUT_RARITY[Config.RarityPrioritas] or 6
+            local prioritas = (rNama and rTingkat >= ambangPri) and rTingkat or 0
+
+            Kolam.skor[nama] = { skor = skor, tunggu = tunggu, karakter = karakter,
+                                 prioritas = prioritas, rarity = rNama, terukur = terukur }
+
+            -- Kelas prioritas menang lebih dulu, baru skor laju.
+            if prioritas > prioritasTerbaik
+               or (prioritas == prioritasTerbaik and skor > skorTerbaik) then
+                terbaik, skorTerbaik, prioritasTerbaik = nama, skor, prioritas
+                if prioritas > 0 then
+                    alasan = string.format("%s memaksa %s 100 persen", nama, tostring(rNama))
+                else
+                    alasan = string.format("%s: %.2f karakter/dtk (tunggu %.2f dtk, %s)",
+                        nama, skor, tunggu, terukur and "terukur" or "taksiran")
+                end
+            end
+        end
+    end
+
+    return terbaik, alasan
+end
+
+-- Ambang tolak-roll AWAL untuk kolam ini, dihitung dari Constants alih-alih
+-- menunggu 20 sampel. Bedanya terasa persis saat berpindah kolam: tanpa ini,
+-- puluhan roll pertama dinilai memakai ambang milik kolam LAMA.
+function Kolam.ambangAwal(nama)
+    local F = konstanta()
+    if not F or not F.Ponds or not F.Ponds[nama] then return nil end
+    local namaRod = rodTerkuat(F)
+    local rodCfg = namaRod and F.Rods and F.Rods[namaRod] or nil
+    local tunggu = perkiraanTunggu(rodCfg, F.Ponds[nama], nama)
+    -- Kolam tanpa penungguan (PONDAREA1) tidak punya apa pun untuk ditolak.
+    if tunggu <= 0 then return nil end
+    -- Sedikit di bawah rata-rata: kira-kira separuh roll ditolak sejak awal,
+    -- lalu penala otomatis mengambil alih begitu sampelnya cukup.
+    return math.max(Config.AmbangMin, math.min(Config.AmbangMaks, tunggu * 0.8))
+end
+
+function Kolam.pindah(nama)
+    local part, jarak = partKolam(nama, true)
+    if not part then return false, "tidak ada penanda TP" .. nama end
+    local hrp = PemainLokal.Character and PemainLokal.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false, "karakter belum ada" end
+    if jarak and jarak < Config.RadiusKolam then return true, "sudah di kolam" end
+    local ok = pcall(function()
+        hrp.CFrame = CFrame.new(part.Position + Vector3.new(0, 3, 0))
+    end)
+    if ok then
+        return true, string.format("pindah ke %s (%d stud)", nama, math.floor(jarak or 0))
+    end
+    return false, "teleport ditolak"
+end
+
+-- Penjaga berkala. Sengaja jarang: memindai seluruh workspace itu mahal, dan
+-- kolam tidak berganti tiap detik. Yang berubah cuma kolam EVENT, dan jeda 20
+-- detik masih menangkapnya jauh sebelum event berakhir.
+local function jagaKolam()
+    while S.hidup do
+        task.wait(Config.JedaPeriksaPond)
+        if Config.AutoPindahPond then
+            local ok, err = pcall(function()
+                local nama, alasan = Kolam.nilai()
+                if nama and nama ~= Kolam.pilihan then
+                    local berhasil, pesan = Kolam.pindah(nama)
+                    if berhasil then
+                        Kolam.pilihan, Kolam.alasan = nama, alasan
+                        catat("kolam -> %s | %s", nama, alasan)
+                        if Gui.ada then pcall(Gui.catPond) end
+                        -- Paksa siklus baru supaya event Started berikutnya
+                        -- datang dari kolam yang benar.
+                        S.pond, S.pondName, S.target = nil, nil, nil
+                        task.delay(0.5, tembak)
+                    else
+                        catat("kolam %s gagal: %s", nama, tostring(pesan))
+                    end
+                end
+            end)
+            if not ok then catat("jagaKolam galat: %s", tostring(err):sub(1, 70)) end
+        end
+    end
+end
+
 -- Ambang yang BERLAKU sekarang: angka manual kalau diisi, hasil hitungan
 -- kalau mode auto, dan AmbangAwal selama sampel belum cukup.
 local function ambang()
     local manual = tonumber(Config.AmbangRoll)
     if manual then return manual end
-    return S.ambangAktif or Config.AmbangAwal
+    return S.ambangAktif or S.ambangKolam or Config.AmbangAwal
 end
 
 -- =========================================================================
@@ -550,6 +1017,10 @@ S.conn[#S.conn + 1] = FishingState.OnClientEvent:Connect(function(d)
             S.iWait = 0
             S.hitungSejak = 0
             S.ambangAktif = nil
+            -- Ambang sementara dari Constants, dipakai sampai sampel kolam BARU
+            -- cukup. Tanpa ini puluhan roll pertama dinilai dengan ambang milik
+            -- kolam lama -- salah, dan tanpa satu pun error.
+            S.ambangKolam = Kolam.ambangAwal(S.pondName)
             if Gui.ada then
                 pcall(Gui.catRoll)
                 pcall(Gui.catNilai)
@@ -594,6 +1065,7 @@ S.conn[#S.conn + 1] = FishingState.OnClientEvent:Connect(function(d)
         end
 
         if w then
+            Kolam.catatTunggu(S.pondName, w)
             -- Cincin 80 sampel: cukup untuk bentuk sebarannya, dan tetap
             -- mengikuti kalau kolam/keadaan berganti.
             S.iWait = (S.iWait % 80) + 1
@@ -614,7 +1086,7 @@ S.conn[#S.conn + 1] = FishingState.OnClientEvent:Connect(function(d)
 
         if Config.TolakRoll and FishingCancel and w and S.pond and S.target
            and w >= ambang()
-           and S.tolakBeruntun < Config.MaksTolakBeruntun then
+           and (Config.Blatant or S.tolakBeruntun < Config.MaksTolakBeruntun) then
             S.tolak = S.tolak + 1
             S.tolakBeruntun = S.tolakBeruntun + 1
             S.tTolak = t
@@ -691,7 +1163,7 @@ local function bangunGui()
     sg.DisplayOrder = 9999
     sg.Parent = induk
 
-    local LEBAR, TINGGI, TINGGI_KECIL = 212, 182, 32
+    local LEBAR, TINGGI, TINGGI_KECIL = 212, 238, 32
 
     local bingkai = Instance.new("Frame")
     bingkai.Name = "Panel"
@@ -858,6 +1330,12 @@ local function bangunGui()
     local bBoost = pil("Boost", 14, 184, 118, 24)
     bBoost.TextSize = 11
 
+    local bBlatant = pil("Blatant", 14, 212, 118, 24)
+    bBlatant.TextSize = 11
+
+    local bPond = pil("Pond", 14, 240, 184, 24)
+    bPond.TextSize = 11
+
     -- Warna mengikuti angkanya supaya bisa dinilai sekilas tanpa dibaca:
     -- di layar penuh 8-10 klien, membaca angka satu per satu tidak praktis.
     local function catFps(nilai)
@@ -916,6 +1394,32 @@ local function bangunGui()
             biaya and string.format("%.0fms", biaya * 1000) or "--")
     end
 
+    local function catBlatant()
+        if Config.Blatant then
+            bBlatant.Text = "BLATANT: ON"
+            bBlatant.BackgroundColor3 = Color3.fromRGB(158, 42, 66)
+            bBlatant.TextColor3 = Color3.fromRGB(255, 226, 232)
+        else
+            bBlatant.Text = "BLATANT: OFF"
+            bBlatant.BackgroundColor3 = W.tombol
+            bBlatant.TextColor3 = W.redup
+        end
+    end
+
+    local function catPond()
+        if Config.AutoPindahPond then
+            -- Nama kolam yang sedang dituju lebih berguna daripada kata ON:
+            -- kalau pilihannya meleset, itu terlihat langsung dari panel.
+            bPond.Text = "POND: " .. tostring(Kolam.pilihan or S.pondName or "mencari...")
+            bPond.BackgroundColor3 = Color3.fromRGB(28, 104, 96)
+            bPond.TextColor3 = Color3.fromRGB(214, 255, 246)
+        else
+            bPond.Text = "AUTO POND: OFF"
+            bPond.BackgroundColor3 = W.tombol
+            bPond.TextColor3 = W.redup
+        end
+    end
+
     local function catBoost()
         if Config.BoostFps then
             bBoost.Text = Boost.sudahJalan and "BOOST FPS: JALAN" or "BOOST FPS: ON"
@@ -963,6 +1467,18 @@ local function bangunGui()
 
     bKurang.Activated:Connect(function() geser(-1) end)
     bTambah.Activated:Connect(function() geser(1) end)
+    bBlatant.Activated:Connect(function()
+        Config.Blatant = not Config.Blatant
+        catBlatant()
+        tulisSimpanan()
+    end)
+
+    bPond.Activated:Connect(function()
+        Config.AutoPindahPond = not Config.AutoPindahPond
+        catPond()
+        tulisSimpanan()
+    end)
+
     bBoost.Activated:Connect(function()
         Config.BoostFps = not Config.BoostFps
         if Config.BoostFps and Boost.jalankan then
@@ -998,6 +1514,8 @@ local function bangunGui()
     catRoll()
     catNilai()
     catBoost()
+    catBlatant()
+    catPond()
 
     Gui.ada = true
     Gui.sg = sg
@@ -1007,6 +1525,8 @@ local function bangunGui()
     Gui.catStat = catStat
     Gui.catFps = catFps
     Gui.catBoost = catBoost
+    Gui.catBlatant = catBlatant
+    Gui.catPond = catPond
     Gui.statistik = rinci   -- dipertahankan: ada kode lama yang menyentuhnya
 end
 
@@ -1444,6 +1964,9 @@ task.spawn(function()
     end
 end)
 
+task.spawn(jagaKolam)
+task.spawn(jagaKlaim)
+
 -- =========================================================================
 -- PEMERIKSA KEADAAN
 -- Berguna saat menjalankan banyak akun: keadaan bisa dibaca dari luar tanpa
@@ -1460,6 +1983,16 @@ getgenv().MozeFishInfo = function()
         tolak       = S.tolak,
         charPerMenit = (S.siklus > 1 and jalan > 0) and (60 / (jalan / (S.siklus - 1))) or 0,
         pond        = S.pondName,
+        pondPilihan = Kolam.pilihan,
+        pondAlasan  = Kolam.alasan,
+        kekuatanRod = Kolam.kekuatan,
+        blatant     = Config.Blatant,
+        klaim       = Config.AutoKlaim and {
+            playtime = Klaim.playtime, quest = Klaim.quest,
+            harian = Klaim.harian, galat = Klaim.galat,
+            pesanGalat = Klaim.pesanGalat ~= "" and Klaim.pesanGalat or nil,
+        } or false,
+        autoPindah  = Config.AutoPindahPond,
         simpan      = Config.Simpan,
         antiAfk     = Config.AntiAfk,
         rodPasang   = S.rodPasang,
