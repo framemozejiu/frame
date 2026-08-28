@@ -36,6 +36,9 @@ local SIMPAN = (function()
 end)()
 
 local Config = { Aktif = (SIMPAN.Aktif ~= false), JedaItem = 0.25 }
+-- Boost SATU ARAH: butuh rejoin untuk pulih. Karena itu default MATI dan
+-- harus dinyalakan sendiri, tidak ikut menyala cuma karena panel dibuka.
+Config.Boost = (SIMPAN.Boost == true)
 -- Dideklarasikan maju: dipakai handler tombol yang dibuat sebelum badannya ada.
 -- `local function` dua kali menghasilkan DUA fungsi berbeda, dan yang dipegang
 -- tombol adalah yang kosong -- setelan tidak akan pernah tersimpan.
@@ -135,8 +138,197 @@ end
 simpanConfig = function()
     if type(writefile) ~= "function" then return end
     pcall(function()
-        writefile(BERKAS, HttpService:JSONEncode({ Aktif = Config.Aktif, Pilih = Pilih }))
+        writefile(BERKAS, HttpService:JSONEncode({
+            Aktif = Config.Aktif, Boost = Config.Boost, Pilih = Pilih,
+        }))
     end)
+end
+
+-- =========================================================================
+-- FPS BOOST  (satu arah -- pulih hanya dengan rejoin)
+--
+-- Aturannya DAFTAR LINDUNG, bukan daftar buang. Melewatkan satu hiasan cuma
+-- kehilangan sedikit FPS; salah menghapus bisa mematikan NPC atau toko, dan
+-- itu baru ketahuan berjam-jam kemudian.
+--
+-- Auto buy di atas TIDAK bergantung pada objek dunia sama sekali (stok dibaca
+-- dari DataService, beli lewat remote), jadi ia tetap jalan walau seluruh
+-- hiasan toko dibuang.
+-- =========================================================================
+local sudahBoost = false
+
+local function boostFPS()
+    if sudahBoost then return "sudah pernah dijalankan" end
+    sudahBoost = true
+
+    local Lighting = game:GetService("Lighting")
+    local ws = workspace
+    local LINDUNGI = {
+        NPCS = true, Booths = true, PhysicalEggsShop = true, GardenCoinShop = true,
+        Pads = true, Click_Points = true, Crafting = true, PetAgeMachine = true,
+        PlatformPositions = true, NavSectors = true, ZONES = true,
+        Player_Orientation_References = true, Terrain = true, Camera = true,
+        ShopRestockTimer = true, CodeRedemptionServer = true, Sprinklers = true,
+    }
+    -- PetsPhysical/Farm/Interaction ikut dibuang atas permintaan pemilik script:
+    -- plot, titik interaksi, dan pet yang terlihat HILANG. Aman di sini karena
+    -- script ini murni auto buy lewat remote; jangan salin ke script tanam/panen.
+    local BUANG = {
+        "BirthdayDecor", "MapDecorations", "Rainbows", "Dirt_VFX", "PetZoneAbilityVFX",
+        "Visuals", "Water_Effect", "WeatherVisuals", "WeatherObjects",
+        "Tutorial_Arrows", "Tutorial_Points", "SoundEffects", "Intro", "SecretObby",
+        "PetsPhysical", "Farm", "Interaction",
+    }
+
+    local n = { folder = 0, part = 0, efek = 0, texture = 0, rata = 0, anim = 0 }
+
+    if type(setfpscap) == "function" then setfpscap(0) end
+    pcall(function()
+        Lighting.GlobalShadows = false
+        Lighting.Technology = Enum.Technology.Compatibility
+        Lighting.FogEnd = 1e6
+        Lighting.Brightness = 1
+        -- Dibuang, bukan sekadar Enabled=false: efek yang mati pun masih ikut
+        -- disiapkan tiap frame.
+        for _, d in ipairs(Lighting:GetDescendants()) do
+            pcall(function() d:Destroy() end)
+            n.efek = n.efek + 1
+        end
+    end)
+    pcall(function()
+        ws.Terrain.WaterWaveSize = 0
+        ws.Terrain.WaterWaveSpeed = 0
+        ws.Terrain.WaterReflectance = 0
+    end)
+
+    for _, nama in ipairs(BUANG) do
+        if not LINDUNGI[nama] then
+            local f = ws:FindFirstChild(nama)
+            if f then
+                n.folder = n.folder + 1
+                pcall(function() f:Destroy() end)
+            end
+        end
+    end
+
+    -- Mematikan partikel/lampu tidak menghapus apa pun yang bisa diklik atau
+    -- dipijak, jadi aman di mana saja -- termasuk pada NPC. Yang hilang cuma kilau.
+    local buangTexture = {}
+    for _, d in ipairs(ws:GetDescendants()) do
+        local k = d.ClassName
+        if k == "ParticleEmitter" or k == "Trail" or k == "Smoke" or k == "Fire"
+           or k == "Sparkles" or k == "Beam" or k == "PointLight" or k == "SpotLight"
+           or k == "SurfaceLight" then
+            pcall(function() d.Enabled = false end)
+            n.efek = n.efek + 1
+        elseif k == "Texture" or k == "Decal" then
+            buangTexture[#buangTexture + 1] = d
+        end
+    end
+    for i, d in ipairs(buangTexture) do
+        pcall(function() d:Destroy() end)
+        n.texture = n.texture + 1
+        -- Dicicil: menghancurkan puluhan ribu instance sekaligus membuat klien
+        -- tersendat beberapa detik, dan itu terlihat seperti script menggantung.
+        if i % 800 == 0 then task.wait() end
+    end
+
+    -- KOREKSI terukur 2026-08-28: tanpa penjaga ini, sapuan part MENGHAPUS
+    -- HumanoidRootPart pemain sendiri -- HRP ber-CanCollide=false dan model
+    -- karakter adalah anak LANGSUNG workspace, jadi ia lolos daftar lindung
+    -- berbasis nama. Karakter lalu terjebak Freefall sampai reset, dengan nyawa
+    -- tetap 100 -- tidak ada satu pun tanda error.
+    local function makhlukHidup(m)
+        if not m:IsA("Model") then return false end
+        if m:FindFirstChildOfClass("Humanoid") then return true end
+        for _, p in ipairs(game:GetService("Players"):GetPlayers()) do
+            if p.Character == m then return true end
+        end
+        return false
+    end
+
+    local buangPart = {}
+    for _, atas in ipairs(ws:GetChildren()) do
+        if not LINDUNGI[atas.Name] and atas ~= ws.Terrain and not makhlukHidup(atas) then
+            for _, d in ipairs(atas:GetDescendants()) do
+                -- CanCollide=false berarti menurut definisinya tidak bisa dipijak.
+                -- Yang bisa dipijak TIDAK PERNAH disentuh, supaya mustahil
+                -- menjatuhkan pemain lewat lantai.
+                if d:IsA("BasePart") and not d.CanCollide and not d:IsA("Terrain") then
+                    buangPart[#buangPart + 1] = d
+                end
+            end
+        end
+    end
+    for i, d in ipairs(buangPart) do
+        pcall(function() d:Destroy() end)
+        n.part = n.part + 1
+        if i % 500 == 0 then task.wait() end
+    end
+
+    -- RATAKAN: part tetap ada dan tetap bisa dipijak, cuma digambar polos.
+    -- SurfaceGui/BillboardGui ikut dibuang: papan nama melayang itu tiap-tiap
+    -- satu kanvas GUI yang digambar ulang terus-menerus.
+    local ratakan = {}
+    for _, d in ipairs(ws:GetDescendants()) do
+        local k = d.ClassName
+        if k == "SpecialMesh" or k == "BlockMesh" or k == "CylinderMesh"
+           or k == "SurfaceGui" or k == "BillboardGui" or k == "ImageLabel"
+           or k == "ImageButton" then
+            ratakan[#ratakan + 1] = d
+        elseif k == "MeshPart" then
+            pcall(function()
+                d.TextureID = ""
+                d.Material = Enum.Material.SmoothPlastic
+                d.Reflectance = 0
+            end)
+            n.rata = n.rata + 1
+        end
+    end
+    for i, d in ipairs(ratakan) do
+        pcall(function() d:Destroy() end)
+        n.rata = n.rata + 1
+        if i % 600 == 0 then task.wait() end
+    end
+
+    -- Menghentikan track yang sedang jalan saja tidak cukup: begitu apa pun
+    -- bergerak, track baru dimainkan. Animator MILIK PEMAIN dilewati -- animasi
+    -- diri sendiri yang beku terlihat patah dan tidak menghemat apa pun berarti.
+    local function bekukan(anim)
+        local induk = anim.Parent and anim.Parent.Parent
+        if induk and game:GetService("Players"):GetPlayerFromCharacter(induk) then return end
+        for _, t in ipairs(anim:GetPlayingAnimationTracks()) do
+            pcall(function() t:Stop(0) end)
+            n.anim = n.anim + 1
+        end
+        anim.AnimationPlayed:Connect(function(track)
+            pcall(function() track:Stop(0) end)
+        end)
+    end
+    for _, d in ipairs(ws:GetDescendants()) do
+        if d:IsA("Animator") then pcall(bekukan, d) end
+    end
+
+    -- Penjaga: streaming memasukkan hiasan kembali saat pemain bergerak.
+    -- Sengaja seringan mungkin (cek ClassName saja) -- handler ini menyala
+    -- ribuan kali per menit; apa pun yang lebih berat di sini justru memakan
+    -- kembali FPS yang baru dihemat.
+    ws.DescendantAdded:Connect(function(d)
+        local k = d.ClassName
+        if k == "ParticleEmitter" or k == "Trail" or k == "Beam" or k == "PointLight"
+           or k == "SpotLight" or k == "SurfaceLight" or k == "Smoke" or k == "Fire" then
+            pcall(function() d.Enabled = false end)
+        elseif k == "Texture" or k == "Decal" then
+            pcall(function() d:Destroy() end)
+        elseif k == "Animator" then
+            pcall(bekukan, d)
+        elseif k == "SpecialMesh" or k == "SurfaceGui" or k == "BillboardGui" then
+            pcall(function() d:Destroy() end)
+        end
+    end)
+
+    return ("%d folder, %d part, %d efek, %d texture, %d mesh/gambar")
+        :format(n.folder, n.part, n.efek, n.texture, n.rata)
 end
 
 -- =========================================================================
@@ -198,13 +390,22 @@ judul.Text = "Event Shop  \226\128\162  Auto Buy"
 judul.Parent = kepala
 
 local bAktif = Instance.new("TextButton")
-bAktif.Size = UDim2.fromOffset(262, 28)
+bAktif.Size = UDim2.fromOffset(128, 28)
 bAktif.Position = UDim2.fromOffset(14, 44)
 bAktif.Font = Enum.Font.GothamBold
 bAktif.TextSize = 12
 bAktif.BorderSizePixel = 0
 bAktif.Parent = bingkai
 sudut(bAktif, 8)
+
+local bBoost = Instance.new("TextButton")
+bBoost.Size = UDim2.fromOffset(128, 28)
+bBoost.Position = UDim2.fromOffset(148, 44)
+bBoost.Font = Enum.Font.GothamBold
+bBoost.TextSize = 12
+bBoost.BorderSizePixel = 0
+bBoost.Parent = bingkai
+sudut(bBoost, 8)
 
 local cari = Instance.new("TextBox")
 cari.Size = UDim2.fromOffset(262, 26)
@@ -247,6 +448,33 @@ bAktif.Activated:Connect(function()
     simpanConfig()
 end)
 catAktif()
+
+local function catBoost()
+    if sudahBoost then
+        bBoost.Text = "FPS BOOST  \226\151\143  ON"
+        bBoost.BackgroundColor3 = W.pilih
+        bBoost.TextColor3 = W.centang
+    else
+        bBoost.Text = "FPS BOOST  \226\151\139  OFF"
+        bBoost.BackgroundColor3 = W.baris
+        bBoost.TextColor3 = W.redup
+    end
+end
+
+-- Sekali tekan, tidak ada jalan pulang selain rejoin -- jadi tombolnya TIDAK
+-- dibuat toggle. Menampilkan "OFF" yang bisa ditekan balik itu bohong.
+bBoost.Activated:Connect(function()
+    if sudahBoost then return end
+    Config.Boost = true
+    simpanConfig()
+    bBoost.Text = "BOOSTING..."
+    task.spawn(function()
+        local ok, hasil = pcall(boostFPS)
+        catBoost()
+        warn("[GAG FPS] " .. (ok and tostring(hasil) or ("GAGAL: " .. tostring(hasil))))
+    end)
+end)
+catBoost()
 
 for nomor, toko in ipairs(TOKO) do
     -- Label disamarkan jadi "Shop N". Nama asli tetap dipakai memanggil remote;
@@ -506,7 +734,20 @@ pcall(function()
     end)
 end)
 
-print(("[GAG] panel siap. %d toko, setelan %s. Anti-AFK aktif."):format(#TOKO,
-    adaSimpanan and "dimuat dari berkas" or "bawaan"))
+-- Boost dipasang ulang otomatis HANYA kalau pernah dinyalakan sendiri di sesi
+-- sebelumnya. Ditunda sampai dunia selesai dimuat: menyapu terlalu dini membuat
+-- hiasan yang belum sempat replikasi lolos, dan boost jadi terlihat lemah.
+if Config.Boost then
+    task.spawn(function()
+        task.wait(6)
+        local ok, hasil = pcall(boostFPS)
+        pcall(catBoost)
+        warn("[GAG FPS] otomatis - " .. (ok and tostring(hasil) or ("GAGAL: " .. tostring(hasil))))
+    end)
+end
+
+print(("[GAG] panel siap. %d toko, setelan %s. Boost %s. Anti-AFK aktif."):format(#TOKO,
+    adaSimpanan and "dimuat dari berkas" or "bawaan",
+    Config.Boost and "ON (otomatis)" or "OFF"))
 
 -- @MOZEFRAME-EOF@
