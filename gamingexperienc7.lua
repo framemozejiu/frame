@@ -44,6 +44,9 @@ Config.Boost = (SIMPAN.Boost == true)
 Config.Tiket = (SIMPAN.Tiket == true)
 -- Kosong = siapa saja. Diisi = HANYA nama itu (pisah koma) yang diterima.
 Config.TiketDari = type(SIMPAN.TiketDari) == "string" and SIMPAN.TiketDari or ""
+-- Pindah server saat semua target habis. Default MATI: salah setelan
+-- membuat bot berputar pindah server tanpa pernah sempat membeli.
+Config.Hop = (SIMPAN.Hop == true)
 -- Dideklarasikan maju: dipakai handler tombol yang dibuat sebelum badannya ada.
 -- `local function` dua kali menghasilkan DUA fungsi berbeda, dan yang dipegang
 -- tombol adalah yang kosong -- setelan tidak akan pernah tersimpan.
@@ -146,6 +149,7 @@ simpanConfig = function()
         writefile(BERKAS, HttpService:JSONEncode({
             Aktif = Config.Aktif, Boost = Config.Boost, Pilih = Pilih,
             Tiket = Config.Tiket, TiketDari = Config.TiketDari,
+            Hop = Config.Hop,
         }))
     end)
 end
@@ -468,6 +472,164 @@ task.spawn(function()
 end)
 
 -- =========================================================================
+-- AUTO HOP  --  pindah server saat semua target habis
+--
+-- Stok itu per-server, jadi target yang kosong di sini bisa penuh di server
+-- sebelah. Ini yang membuat menunggu restock di satu server kalah cepat
+-- dibanding pindah.
+--
+-- Tiga penjaga, semuanya karena mode gagalnya sama: bot berputar pindah
+-- server tanpa pernah sempat membeli.
+--   1. HOP_MINIMAL  -- data toko belum tentu sudah replikasi saat baru masuk;
+--                      menilai stok terlalu dini membaca "semua nol" yang palsu.
+--   2. HOP_TAHAN    -- nol harus BERTAHAN sekian detik, bukan sekejap.
+--   3. tidak pindah saat ada trade jalan (barang bisa hilang di tengah jalan).
+-- =========================================================================
+local TeleportService = game:GetService("TeleportService")
+
+local HOP_MINIMAL = 25      -- detik sejak script mulai
+local HOP_TAHAN = 20        -- detik semua target harus terus nol
+local HOP_JEDA_GAGAL = 15   -- jeda sebelum mencoba lagi kalau daftar server gagal
+
+local hopMulai = os.clock()
+local hopNolSejak = nil
+local hopSedang = false
+
+-- Semua target yang dicentang habis?  nil = belum bisa dinilai (data kosong).
+local function semuaTargetNol()
+    local semua = bacaStok()
+    if not semua or next(semua) == nil then return nil end
+    local adaTarget = false
+    for _, toko in ipairs(TOKO) do
+        local s2 = semua[toko]
+        local stoks = s2 and s2.Stocks
+        for _, x in ipairs(Daftar[toko]) do
+            if Pilih[toko][x.nama] then
+                adaTarget = true
+                -- Toko yang datanya belum replikasi BUKAN toko yang habis.
+                -- Menganggapnya nol membuat bot pindah server justru saat
+                -- data belum sempat sampai -- dan itu terjadi tepat setelah
+                -- masuk, saat stok paling mungkin masih penuh.
+                if not stoks then return nil end
+                local st = stoks[x.nama]
+                local sisa = (type(st) == "table") and (tonumber(st.Stock) or 0)
+                    or (tonumber(st) or 0)
+                if sisa > 0 then return false end
+            end
+        end
+    end
+    -- Tanpa satu pun target tercentang, "semua habis" tidak punya arti --
+    -- jangan pindah server karena pengguna belum memilih apa pun.
+    if not adaTarget then return nil end
+    return true
+end
+
+-- Daftar server publik. Diambil lewat request/http_request, BUKAN game:HttpGet:
+-- HttpGet mengembalikan string tanpa status, jadi 429 (rate limit) terbaca
+-- sebagai isi yang sah dan JSONDecode gagal tanpa sebab yang jelas.
+local function daftarServer()
+    -- sortOrder=Asc WAJIB, terukur 2026-08-29: server GaG1 cuma muat 4 pemain,
+    -- dan Desc mengurutkan dari yang teramai -- 100 dari 100 hasilnya 4/4 alias
+    -- penuh semua, kandidat NOL. Fitur ini akan diam tanpa pernah pindah.
+    -- Asc pada percobaan yang sama memberi 100 dari 100 kandidat (playing 1..3).
+    local url = "https://games.roblox.com/v1/games/" .. tostring(game.PlaceId)
+        .. "/servers/Public?sortOrder=Asc&limit=100"
+    local kirim = (type(request) == "function" and request)
+        or (type(http_request) == "function" and http_request)
+    local isi
+    if kirim then
+        local ok, r = pcall(kirim, { Url = url, Method = "GET" })
+        if not ok or type(r) ~= "table" then return nil, "request gagal" end
+        if tonumber(r.StatusCode) ~= 200 then
+            return nil, "HTTP " .. tostring(r.StatusCode)
+        end
+        isi = r.Body
+    else
+        local ok, r = pcall(function() return game:HttpGet(url, true) end)
+        if not ok then return nil, "HttpGet gagal" end
+        isi = r
+    end
+    local ok, data = pcall(function() return HttpService:JSONDecode(isi) end)
+    if not ok or type(data) ~= "table" or type(data.data) ~= "table" then
+        return nil, "JSON tidak terbaca"
+    end
+    local calon = {}
+    for _, sv in ipairs(data.data) do
+        if type(sv.id) == "string" and sv.id ~= game.JobId
+           and tonumber(sv.playing) and tonumber(sv.maxPlayers)
+           and sv.playing < sv.maxPlayers then
+            calon[#calon + 1] = sv.id
+        end
+    end
+    return calon
+end
+
+local function lakukanHop()
+    if hopSedang then return end
+    hopSedang = true
+
+    local calon, sebab = daftarServer()
+    if not calon or #calon == 0 then
+        warn("[GAG HOP] daftar server tidak dapat: " .. tostring(sebab or "kosong"))
+        task.wait(HOP_JEDA_GAGAL)
+        hopSedang = false
+        hopNolSejak = nil
+        return
+    end
+
+    -- Diacak, bukan diambil yang teratas: puluhan bot yang memakai script ini
+    -- akan memilih server yang SAMA kalau urutannya tetap, dan mereka saling
+    -- merebut stok yang baru saja dicari.
+    local pilih = calon[math.random(1, #calon)]
+
+    -- Script tidak ikut terbawa saat teleport; tanpa ini bot mendarat di server
+    -- baru dalam keadaan mati. URL-nya diwariskan loader (MozeframeKaitunURL).
+    local u = getgenv().MozeframeKaitunURL
+    if type(queue_on_teleport) == "function" and type(u) == "string" then
+        pcall(queue_on_teleport,
+            ("loadstring(game:HttpGet('%s?t=' .. tostring(os.time())))()"):format(u))
+    else
+        warn("[GAG HOP] queue_on_teleport/URL tidak ada - script TIDAK akan "
+            .. "menyala sendiri di server baru.")
+    end
+
+    warn("[GAG HOP] semua target habis, pindah server...")
+    local ok = pcall(function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, pilih, LP)
+    end)
+    if not ok then
+        pcall(function() TeleportService:Teleport(game.PlaceId, LP) end)
+    end
+    task.wait(10)
+    hopSedang = false
+end
+
+task.spawn(function()
+    while true do
+        task.wait(2)
+        if Config.Hop and not hopSedang and os.clock() - hopMulai >= HOP_MINIMAL then
+            local nol = semuaTargetNol()
+            if nol == true then
+                -- Trade yang sedang jalan tidak boleh ditinggal: barangnya
+                -- bisa menggantung di sesi yang ditinggalkan.
+                local adaTrade = TradingController ~= nil
+                    and TradingController.CurrentTradeId ~= nil
+                if adaTrade then
+                    hopNolSejak = nil
+                else
+                    hopNolSejak = hopNolSejak or os.clock()
+                    if os.clock() - hopNolSejak >= HOP_TAHAN then
+                        task.spawn(lakukanHop)
+                    end
+                end
+            else
+                hopNolSejak = nil
+            end
+        end
+    end
+end)
+
+-- =========================================================================
 -- PANEL
 -- =========================================================================
 local W = {
@@ -498,7 +660,7 @@ sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 sg.Parent = (gethui and gethui()) or LP:WaitForChild("PlayerGui")
 
 local bingkai = Instance.new("Frame")
-bingkai.Size = UDim2.fromOffset(290, 458)
+bingkai.Size = UDim2.fromOffset(290, 492)
 bingkai.Position = UDim2.fromScale(0.03, 0.15)
 bingkai.BackgroundColor3 = W.latar
 bingkai.BorderSizePixel = 0
@@ -552,9 +714,18 @@ bTiket.BorderSizePixel = 0
 bTiket.Parent = bingkai
 sudut(bTiket, 8)
 
+local bHop = Instance.new("TextButton")
+bHop.Size = UDim2.fromOffset(128, 28)
+bHop.Position = UDim2.fromOffset(148, 78)
+bHop.Font = Enum.Font.GothamBold
+bHop.TextSize = 12
+bHop.BorderSizePixel = 0
+bHop.Parent = bingkai
+sudut(bHop, 8)
+
 local kotakDari = Instance.new("TextBox")
-kotakDari.Size = UDim2.fromOffset(128, 28)
-kotakDari.Position = UDim2.fromOffset(148, 78)
+kotakDari.Size = UDim2.fromOffset(262, 26)
+kotakDari.Position = UDim2.fromOffset(14, 112)
 kotakDari.BackgroundColor3 = W.baris
 kotakDari.BorderSizePixel = 0
 kotakDari.Font = Enum.Font.Gotham
@@ -570,7 +741,7 @@ sudut(kotakDari, 7)
 
 local cari = Instance.new("TextBox")
 cari.Size = UDim2.fromOffset(262, 26)
-cari.Position = UDim2.fromOffset(14, 112)
+cari.Position = UDim2.fromOffset(14, 146)
 cari.BackgroundColor3 = W.baris
 cari.BorderSizePixel = 0
 cari.Font = Enum.Font.Gotham
@@ -585,7 +756,7 @@ cari.Parent = bingkai
 sudut(cari, 7)
 
 local gulir = Instance.new("ScrollingFrame")
-gulir.Position = UDim2.fromOffset(12, 146)
+gulir.Position = UDim2.fromOffset(12, 180)
 gulir.Size = UDim2.fromOffset(266, 300)
 gulir.BackgroundTransparency = 1
 gulir.BorderSizePixel = 0
@@ -653,6 +824,21 @@ kotakDari.FocusLost:Connect(function()
     simpanConfig()
 end)
 catTiket()
+
+local function catHop()
+    bHop.Text = Config.Hop and "AUTO HOP  \226\151\143  ON" or "AUTO HOP  \226\151\139  OFF"
+    bHop.BackgroundColor3 = Config.Hop and W.pilih or W.baris
+    bHop.TextColor3 = Config.Hop and W.centang or W.redup
+end
+bHop.Activated:Connect(function()
+    Config.Hop = not Config.Hop
+    catHop()
+    simpanConfig()
+    -- Hitungan nol dimulai dari nol lagi tiap kali disalakan, supaya menekan
+    -- tombol tidak langsung memicu pindah karena sisa hitungan lama.
+    hopNolSejak = nil
+end)
+catHop()
 
 for nomor, toko in ipairs(TOKO) do
     -- Label disamarkan jadi "Shop N". Nama asli tetap dipakai memanggil remote;
@@ -859,7 +1045,7 @@ local terakhir = {}
 -- Ini BUKAN cara menembus batas stok: server tetap memvalidasi tiap tembakan
 -- dan menolak yang melebihi. Menembak stok habis aman (ditolak, tidak memakan
 -- apa pun) -- itu sebabnya melebihkan sedikit tidak berbahaya.
-local BURST_JEDA = 0.05
+local BURST_JEDA = 0.01
 local BURST_MAKS = 25
 local sedangBurst = {}
 
