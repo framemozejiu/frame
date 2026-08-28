@@ -6173,6 +6173,105 @@ local function catatPS(fmt, ...)
     print("[MozePS99] " .. string.format(fmt, ...))
 end
 
+
+-- ==========================================
+-- AUTO BREAKOUT UPGRADE
+--
+-- KOREKSI 2026-08-28: toggle "Auto Breakout Upgrade" sudah ada di panel sejak
+-- lama, tapi `Config.luckyAutoUpgrade` TIDAK PERNAH DIBACA di mana pun --
+-- muncul persis dua kali di seluruh berkas: nilai awal toggle dan setternya.
+-- Jadi selama ini ia menyala, tersimpan, dan tidak melakukan apa pun. Dari sisi
+-- pemain itu tidak bisa dibedakan dari fitur yang bekerja, dan buyer melaporkan
+-- "upgrade ga work". Mereka benar.
+--
+-- Jalurnya sama persis dengan Fiesta di atas: upgrade Lucky Breakout ternyata
+-- **EventUpgrades**, bukan zone Upgrades. Terukur di akun uji, 9 upgrade
+-- berawalan "LuckyBreakout" ada di Directory.EventUpgrades:
+--
+--     BoardSlots (Pet Slots, power 30)  BallPower (Pet Power)
+--     BallSpeed (Pet Speed)             BuxBonus (Breakout Coin Boost)
+--     BlockLuck                         EggTier (Better Eggs)
+--     GiftDrops (Lucky Bag Drops)       TitanicChestLuck (power 0)
+--     GargantuanChestLuck (power 0)
+--
+-- `UpgradeCmds` BUKAN jalurnya, dan itu sempat menyesatkan: fungsinya menerima
+-- DUA argumen (idUpgrade, zona) sehingga panggilan satu argumen selalu balik
+-- nil, seolah tidak ada apa-apa di sana.
+local LUCKY_PRIORITAS_INTI = {
+    "LuckyBreakoutBallPower",   -- damage dulu: semua hal lain ikut cepat
+    "LuckyBreakoutBuxBonus",    -- lalu penghasilan coin, supaya sisanya menyusul
+    "LuckyBreakoutBoardSlots",
+    "LuckyBreakoutBallSpeed",
+    "LuckyBreakoutBlockLuck",
+    "LuckyBreakoutEggTier",
+    "LuckyBreakoutGiftDrops",
+    "LuckyBreakoutTitanicChestLuck",
+    "LuckyBreakoutGargantuanChestLuck",
+}
+
+-- Sama seperti Fiesta: yang disebut lebih dulu dibeli lebih dulu, sisanya
+-- diisi OTOMATIS dari Directory supaya upgrade baru yang ditambahkan game ikut
+-- terbeli tanpa perlu menyunting script lagi.
+local LUCKY_PRIORITAS = (function()
+    local urut, sudah = {}, {}
+    for _, id in ipairs(LUCKY_PRIORITAS_INTI) do
+        urut[#urut + 1] = id
+        sudah[id] = true
+    end
+    pcall(function()
+        local D = require(ReplicatedStorage.Library.Directory.EventUpgrades)
+        local tambahan = {}
+        for id, d in pairs(D) do
+            if type(d) == "table" and type(id) == "string"
+                and string.sub(id, 1, 13) == "LuckyBreakout"
+                and not sudah[id] then
+                tambahan[#tambahan + 1] = id
+            end
+        end
+        table.sort(tambahan)  -- urutan pairs tidak terdefinisi; jangan acak
+        for _, id in ipairs(tambahan) do urut[#urut + 1] = id end
+    end)
+    return urut
+end)()
+
+task.spawn(function()
+    pcall(function() if setthreadidentity then setthreadidentity(2) end end)
+    while generasiIni() do
+        task.wait(15)
+
+        if Config.luckyAutoUpgrade then
+            pcall(function()
+                local EU = require(Client:WaitForChild("EventUpgradeCmds"))
+                local terbeli, tierBaru
+
+                for _, nama in ipairs(LUCKY_PRIORITAS) do
+                    -- Tidak ada API "sudah max" yang terekspos, jadi tidak ada
+                    -- yang bisa ditanyakan lebih dulu: Purchase sendiri yang
+                    -- menolak, entah karena max entah karena coin kurang.
+                    -- Keduanya aman -- yang ditolak tidak memakan apa pun.
+                    local ok, berhasil = pcall(EU.Purchase, nama)
+                    if ok and berhasil == true then
+                        terbeli = nama
+                        -- Dijeda sebentar sebelum membaca tier: dibaca seketika
+                        -- sesudah Purchase, nilainya masih yang LAMA (terukur
+                        -- melaporkan "tier 0" padahal sudah jadi 1), dan status
+                        -- yang salah lebih buruk daripada status yang telat.
+                        task.wait(0.3)
+                        tierBaru = select(2, pcall(EU.GetTier, nama))
+                        break -- satu pembelian per siklus
+                    end
+                end
+
+                if terbeli then
+                    MazeStatus.Text = string.format("Breakout upgrade: %s -> tier %s",
+                        tostring(terbeli):sub(14), tostring(tierBaru))
+                    catatPS("breakout upgrade %s -> tier %s", tostring(terbeli), tostring(tierBaru))
+                end
+            end)
+        end
+    end
+end)
+
 -- ==========================================
 -- AUTO KLAIM CHEST BERWAKTU (Titanic & GARG)
 --
