@@ -493,6 +493,8 @@ local S = {
     -- pernah di bawah 3. Panel dulu menampilkan siklus tapi menamainya
     -- "character/menit", jadi angkanya terlalu kecil 3,58 kali.
     karakter    = 0,
+    -- {t, n} tiap tangkapan, dipangkas ke 60 detik terakhir.
+    jendela     = {},
     tembak      = 0,
     diterima    = 0,
     jumRestart  = 0,
@@ -1813,6 +1815,23 @@ local function jagaKolam()
 end
 
 
+-- Laju karakter per menit dari 60 detik terakhir. Kembali ke rata-rata
+-- seumur-hidup selama sampelnya belum cukup (dua titik pertama).
+local function lajuTerkini()
+    local j = S.jendela
+    if #j >= 2 then
+        local rentang = j[#j].t - j[1].t
+        if rentang > 3 then
+            return (j[#j].n - j[1].n) / rentang * 60
+        end
+    end
+    if S.tMulai then
+        local jalan = os.clock() - S.tMulai
+        if jalan > 0 then return S.karakter / jalan * 60 end
+    end
+    return 0
+end
+
 -- Ambang yang BERLAKU sekarang: angka manual kalau diisi, hasil hitungan
 -- kalau mode auto, dan AmbangAwal selama sampel belum cukup.
 local function ambang()
@@ -2016,6 +2035,14 @@ S.conn[#S.conn + 1] = FishingState.OnClientEvent:Connect(function(d)
             for _ in pairs(d.rewards) do n = n + 1 end
         end
         S.karakter = S.karakter + (n > 0 and n or 1)
+        -- Jendela bergulir untuk laju TERKINI. Angka seumur-hidup menyesatkan:
+        -- sekali macet di awal, rata-ratanya tertekan selamanya dan panel terus
+        -- melaporkan angka rendah padahal saat itu juga panennya sudah normal.
+        -- Terukur: panel menunjukkan 191/mnt sementara laju sesungguhnya 245.
+        S.jendela[#S.jendela + 1] = { t = t, n = S.karakter }
+        while #S.jendela > 1 and (t - S.jendela[1].t) > 60 do
+            table.remove(S.jendela, 1)
+        end
         S.tCompleted = t
         -- tCompleted DIHAPUS lagi di handler Started, jadi tidak bisa dipakai
         -- untuk menjawab "masih panen atau tidak". tPanen tidak pernah dihapus.
@@ -3009,7 +3036,7 @@ task.spawn(function()
                 -- Karakter dibagi waktu berjalan langsung, bukan dikali
                 -- rata-rata per siklus: multi-pull berubah-ubah tiap tarikan,
                 -- jadi mengalikan rata-rata menambah galat tanpa alasan.
-                local karMnt = jalan > 0 and (S.karakter / jalan * 60) or 0
+                local karMnt = lajuTerkini()
                 Gui.catStat(karMnt, tangkapMnt, S.karakter, S.tolak, S.biaya)
             end)
         end
@@ -3020,7 +3047,7 @@ task.spawn(function()
             local perSiklus = S.siklus > 1 and (jalan / (S.siklus - 1)) or 0
             local restart = S.nRestart > 0 and (S.jumRestart / S.nRestart) or 0
             catat("%.1f karakter/menit (%.1f tangkap/mnt) | %d siklus | restart %.3f | buang %d | rr %s | diterima %d/%d%s",
-                jalan > 0 and (S.karakter / jalan * 60) or 0,
+                lajuTerkini(),
                 perSiklus > 0 and (60 / perSiklus) or 0, S.siklus, restart, S.tolak,
                 S.biaya and string.format("%.0fms", S.biaya * 1000) or "-",
                 S.diterima, S.tembak,
