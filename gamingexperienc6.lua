@@ -218,6 +218,32 @@ end
 local MODE_FEED = { "rata", "level", "cps", "rarity", "rata200" }
 -- Dipakai tombol pemutar di panel dan penyaring tipe prompt di modul feed.
 local JUMLAH_FEED = { "1", "10", "max" }
+-- Diputar tombol panel. "-" berarti tanpa saringan rarity.
+-- Nama mode untuk TAMPILAN saja. Nilai config-nya sengaja tetap seperti
+-- semula supaya setelan yang sudah tersimpan di berkas pemain tidak jadi
+-- tidak terbaca sesudah pembaruan ini.
+local MODE_INGGRIS = { rata = "even", level = "level", cps = "cps",
+                       rarity = "rarity", rata200 = "even+cap" }
+-- Ambang tabungan yang bisa diputar dari panel. 0 = tanpa ambang.
+local TABUNG_FEED = { 0, 1e8, 5e8, 1e9, 2e9, 5e9, 1e10 }
+local RARITY_FEED = { "-", "Divine", "Supreme", "Celestial", "Ancient",
+                      "God", "Omniscient", "Exclusive" }
+
+-- 793200 -> "793.2K". Dipakai di status panel dan di tombol tabungan.
+--
+-- DITARUH DI ATAS dengan sengaja. Waktu ia masih didefinisikan di modul feed
+-- (jauh di bawah kode GUI), catFeed memanggilnya sebagai GLOBAL yang bernilai
+-- nil, galat di tengah jalan, dan karena bangunGui dibungkus pcall, galatnya
+-- tertelan: tombolnya tidak pernah dilabeli dan panel berhenti diperbarui
+-- tanpa satu pun pesan error.
+local function angkaRingkas(n)
+    n = tonumber(n) or 0
+    local satuan = { { 1e12, "T" }, { 1e9, "B" }, { 1e6, "M" }, { 1e3, "K" } }
+    for _, s in ipairs(satuan) do
+        if n >= s[1] then return string.format("%.1f%s", n / s[1], s[2]) end
+    end
+    return string.format("%d", n)
+end
 
 local Config = {
     Aktif         = pilihSaklar("Aktif", true),   -- default NYALA: itu guna script ini
@@ -287,17 +313,37 @@ local Config = {
     -- balik ke "rata" tiap kali script dimuat ulang.
     FeedMode        = tostring(U.FeedMode or SIMPAN.FeedMode or "rata"),
     FeedJeda        = tonumber(U.FeedJeda) or 90,
-    -- Berapa stand per lompatan. 5 stand ~2 detik; makin banyak makin lama
-    -- karakter meninggalkan kolam, dan itu yang membatalkan pancingan.
-    FeedPerSesi     = tonumber(U.FeedPerSesi) or 5,
+    -- Berapa TEKAN per sesi. Tiap tekan ~0,68 detik (0,35 tiba + 0,08 tahan +
+    -- 0,25 pasca), jadi 8 tekan ~5,4 detik karakter meninggalkan kolam.
+    -- Menaikkannya mempercepat pembelanjaan food tapi memperpanjang jeda panen
+    -- -- itu pertukaran yang nyata, bukan sekadar angka bebas.
+    -- BATAS ATAS tekan per sesi, bukan target. Berapa yang benar-benar ditekan
+    -- diputuskan jatah adaptif di bawah; angka ini cuma pagar waktu.
+    FeedPerSesi     = tonumber(U.FeedPerSesi) or 15,
+    -- Berapa bagian SIMPANAN yang dikikis tiap sesi, di atas jatah untuk
+    -- mengimbangi produksi. 0,2 = seperlima simpanan per sesi.
+    FeedKikis       = tonumber(U.FeedKikis) or 0.2,
     -- Sisakan food minimal sekian. 0 = pakai sampai habis.
     FeedSisaFood    = tonumber(U.FeedSisaFood) or 0,
     -- Batas level untuk mode "rata200".
-    FeedBatas       = tonumber(U.FeedBatas) or 200,
+    -- Batas level GLOBAL: karakter yang sudah mencapai angka ini tidak diberi
+    -- makan lagi, di mode mana pun. 0 = tanpa batas. Mode "rata200" memakai 200
+    -- kalau angka ini dibiarkan 0, supaya perilaku lamanya tetap.
+    FeedLevelMaks   = tonumber(U.FeedLevelMaks) or SIMPAN.FeedLevelMaks or 0,
+    -- Rarity MINIMAL yang boleh diberi makan, memakai nama resmi game
+    -- (Ascended, Divine, Supreme, Celestial, Ancient, God, Omniscient,
+    -- Exclusive). "" = semua rarity. Untuk "di atas Celestial", isi "Ancient".
+    FeedRarityMin   = tostring(U.FeedRarityMin or SIMPAN.FeedRarityMin or ""),
     -- Batas satu kali tekan, sebagai PECAHAN dari food yang dipegang.
     -- Terukur kenapa ini perlu: tanpa batas, satu sesi menghabiskan 1,07
     -- MILIAR food karena tombol LevelUp10 di stand mahal ikut ditekan.
-    FeedMaksPecahan = tonumber(U.FeedMaksPecahan) or 0.05,
+    -- Jatah belanja sekali sesi sebagai pecahan food. Default 1 = BEBASKAN.
+    --
+    -- Dulu 0,05 supaya food "menabung". Itu keliru untuk game ini: REBIRTH
+    -- MENGHAPUS SELURUH FOOD, jadi food yang ditumpuk justru hangus. Yang
+    -- benar dihabiskan sambil jalan -- produksinya toh terus mengisi ulang.
+    -- Turunkan sendiri kalau memang mau menahan belanja.
+    FeedMaksPecahan = tonumber(U.FeedMaksPecahan) or 1,
     -- TABUNGAN: sesi feed tidak dimulai sama sekali sampai food mencapai
     -- angka ini. 0 = tanpa ambang. Isi 1e9 kalau mau menabung 1 miliar
     -- dulu baru memberi makan.
@@ -418,6 +464,8 @@ local function tulisSimpanan()
             AutoSpot   = Config.AutoSpot,
             FeedJumlah = Config.FeedJumlah,
             FeedMulaiDari = Config.FeedMulaiDari,
+            FeedLevelMaks = Config.FeedLevelMaks,
+            FeedRarityMin = Config.FeedRarityMin,
         }))
     end)
 end
@@ -429,6 +477,32 @@ end
 -- statistiknya jadi bohong dan polanya jadi ramai tanpa guna.
 if type(getgenv().MozeFishStop) == "function" then
     pcall(getgenv().MozeFishStop)
+end
+
+-- Panel lama DIHAPUS, tidak cuma dilepas loop-nya.
+--
+-- MozeFishStop menghentikan tugas tapi meninggalkan ScreenGui-nya. Terukur:
+-- sesudah beberapa kali jalankan-ulang ada TIGA panel menumpuk sekaligus, dua
+-- di antaranya beku dan tidak pernah diperbarui -- dan yang teratas itulah yang
+-- dibaca pemain, jadi panel terlihat "macet" padahal versi barunya sehat.
+--
+-- Disapu di ketiga tempat karena panelnya diparkir di gethui() kalau ada,
+-- CoreGui kalau tidak, dan PlayerGui sebagai jalan terakhir.
+do
+    local tempat = {}
+    pcall(function() if gethui then table.insert(tempat, gethui()) end end)
+    pcall(function() table.insert(tempat, game:GetService("CoreGui")) end)
+    pcall(function()
+        table.insert(tempat, game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui", 5))
+    end)
+    for _, induk in ipairs(tempat) do
+        if induk then
+            -- GetChildren, bukan FindFirstChild: yang menumpuk lebih dari satu.
+            for _, anak in ipairs(induk:GetChildren()) do
+                if anak.Name == "MozeFishUI" then pcall(function() anak:Destroy() end) end
+            end
+        end
+    end
 end
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes", 20)
@@ -2099,9 +2173,11 @@ local function bangunGui()
     sg.DisplayOrder = 9999
     sg.Parent = induk
 
-    -- TINGGI naik dari 242 saat baris AUTO FEED dan AUTO SPOT ditambahkan;
-    -- tanpa itu dua tombol terakhir terpotong di bawah bingkai.
-    local LEBAR, TINGGI, TINGGI_KECIL = 212, 302, 32
+    -- Dilebarkan dari 212 dan ditinggikan dari 242 saat blok AUTO FEED masuk.
+    -- Di 212 px label terpaksa dipotong jadi "RAR: Anci" dan status seperti
+    -- "nabung 24.6M>20.4M" tidak muat -- panel yang tidak terbaca sama saja
+    -- dengan panel yang tidak ada.
+    local LEBAR, TINGGI, TINGGI_KECIL = 250, 358, 32
 
     local bingkai = Instance.new("Frame")
     bingkai.Name = "Panel"
@@ -2225,7 +2301,7 @@ local function bangunGui()
     satuan.TextSize = 10
     satuan.TextXAlignment = Enum.TextXAlignment.Left
     satuan.TextColor3 = W.redup
-    satuan.Text = "character / menit"
+    satuan.Text = "characters / min"
     satuan.Parent = isi
 
     local rinci = Instance.new("TextLabel")
@@ -2237,7 +2313,7 @@ local function bangunGui()
     rinci.TextSize = 10
     rinci.TextXAlignment = Enum.TextXAlignment.Left
     rinci.TextColor3 = W.redup
-    rinci.Text = "menunggu siklus pertama..."
+    rinci.Text = "waiting for first cycle..."
     rinci.Parent = isi
 
     local function pil(nama, x, lebar, y, tinggi)
@@ -2256,35 +2332,44 @@ local function bangunGui()
         return b
     end
 
-    local tombol     = pil("Saklar", 14, 88, 54, 26)
-    local tombolRoll = pil("SaklarRoll", 110, 88, 54, 26)
-    local bKurang    = pil("Kurang", 14, 30, 88, 24)
-    local bNilai     = pil("Nilai", 50, 112, 88, 24)
-    local bTambah    = pil("Tambah", 168, 30, 88, 24)
+    local tombol     = pil("Saklar", 14, 105, 54, 26)
+    local tombolRoll = pil("SaklarRoll", 131, 105, 54, 26)
+    local bKurang    = pil("Kurang", 14, 34, 88, 24)
+    local bNilai     = pil("Nilai", 52, 140, 88, 24)
+    local bTambah    = pil("Tambah", 202, 34, 88, 24)
     bKurang.Text = "−"
     bTambah.Text = "+"
     bNilai.TextSize = 10
 
-    local bBoost = pil("Boost", 14, 184, 118, 24)
+    local bBoost = pil("Boost", 14, 222, 118, 24)
     bBoost.TextSize = 11
 
-    local bPond = pil("Pond", 14, 184, 148, 24)
+    local bPond = pil("Pond", 14, 222, 148, 24)
     bPond.TextSize = 11
 
-    local bLayar = pil("Layar", 14, 184, 178, 24)
+    local bLayar = pil("Layar", 14, 222, 178, 24)
     bLayar.TextSize = 11
 
     -- Feed dan mode dipisah: modenya diputar tanpa harus mematikan fiturnya,
     -- supaya bisa ganti strategi di tengah jalan.
-    local bFeed = pil("Feed", 14, 96, 208, 24)
+    -- Baris penuh untuk saklar + status, lalu SUB-BARIS berisi tiga pilihan.
+    -- Dipisah begini supaya statusnya ("nabung 24.6M>20.4M", "+4 lvl 17.3M")
+    -- punya tempat utuh dan tidak berebut ruang dengan label pilihan.
+    local bFeed = pil("Feed", 14, 222, 208, 24)
     bFeed.TextSize = 11
-    local bMode = pil("Mode", 114, 52, 208, 24)
+    local bMode = pil("Mode", 14, 78, 236, 22)
     bMode.TextSize = 10
-    -- Tombol ketiga di baris yang sama: berapa level sekali tekan (1/10/max).
-    local bJum = pil("Jumlah", 170, 28, 208, 24)
+    local bJum = pil("Jumlah", 96, 44, 236, 22)
     bJum.TextSize = 10
+    local bRar = pil("Rarity", 144, 92, 236, 22)
+    bRar.TextSize = 10
 
-    local bSpot = pil("Spot", 14, 184, 238, 24)
+    -- Baris tersendiri: ambang tabungan menentukan SEBERAPA SERING karakter
+    -- meninggalkan kolam, jadi ia pantas terbaca jelas, bukan disempilkan.
+    local bTabung = pil("Tabung", 14, 222, 264, 22)
+    bTabung.TextSize = 10
+
+    local bSpot = pil("Spot", 14, 222, 290, 24)
     bSpot.TextSize = 11
 
     -- Warna mengikuti angkanya supaya bisa dinilai sekilas tanpa dibaca:
@@ -2299,11 +2384,11 @@ local function bangunGui()
     -- ---- PEWARNA ----
     local function cat()
         if Config.Aktif then
-            tombol.Text = "AKTIF"
+            tombol.Text = "ACTIVE"
             tombol.BackgroundColor3 = W.hijau
             titik.BackgroundColor3 = W.hijau
         else
-            tombol.Text = "MATI"
+            tombol.Text = "PAUSED"
             tombol.BackgroundColor3 = W.merah
             titik.BackgroundColor3 = W.merah
         end
@@ -2345,7 +2430,7 @@ local function bangunGui()
     -- angka itu berbeda jauh begitu multi-pull aktif.
     local function catStat(karPerMenit, tangkapPerMenit, karakter, tolak, biaya)
         angka.Text = string.format("%.1f", karPerMenit or 0)
-        rinci.Text = string.format("%d char · %.0f tangkap/mnt · buang %d · %s",
+        rinci.Text = string.format("%d char · %.0f catch/min · rerolls %d · %s",
             karakter or 0, tangkapPerMenit or 0, tolak or 0,
             biaya and string.format("%.0fms", biaya * 1000) or "--")
     end
@@ -2367,7 +2452,10 @@ local function bangunGui()
 
     local function catFeed()
         if Config.AutoFeed then
-            bFeed.Text = "AUTO FEED: ON"
+            -- Status ikut ditampilkan. Tanpa ini, auto feed yang sedang
+            -- menabung atau tidak menemukan kandidat terlihat persis seperti
+            -- auto feed yang rusak -- dan itu memang sempat membuat bingung.
+            bFeed.Text = "FEED: " .. tostring(Gui.statusFeed or "ready")
             bFeed.BackgroundColor3 = Color3.fromRGB(58, 58, 74)
             bFeed.TextColor3 = Color3.fromRGB(232, 232, 240)
         else
@@ -2375,8 +2463,14 @@ local function bangunGui()
             bFeed.BackgroundColor3 = W.tombol
             bFeed.TextColor3 = W.redup
         end
-        bMode.Text = tostring(Config.FeedMode)
-        bJum.Text = tostring(Config.FeedJumlah)
+        bMode.Text = "mode: " .. (MODE_INGGRIS[tostring(Config.FeedMode)] or tostring(Config.FeedMode))
+        bJum.Text = tostring(Config.FeedJumlah) .. "x"
+        local r = tostring(Config.FeedRarityMin)
+        -- Muat utuh sekarang (92 px), jadi nama rarity tidak dipotong lagi.
+        bRar.Text = (r == "" or r == "-") and "any rarity" or (r .. "+")
+        local amb = tonumber(Config.FeedMulaiDari) or 0
+        bTabung.Text = (amb <= 0) and "SAVE UP: off (feed as it comes)"
+            or ("SAVE UP: " .. angkaRingkas(amb) .. " then spend down")
     end
 
     local function catSpot()
@@ -2401,11 +2495,11 @@ local function bangunGui()
         end
         local saran = Kolam.pilihan
         if kini and saran and saran ~= kini then
-            bPond.Text = kini .. "  \f  " .. saran .. " lebih baik"
+            bPond.Text = kini .. "  \f  " .. saran .. " is better"
             bPond.BackgroundColor3 = Color3.fromRGB(150, 96, 24)
             bPond.TextColor3 = Color3.fromRGB(255, 240, 220)
         else
-            bPond.Text = "POND: " .. tostring(kini or saran or "mencari...")
+            bPond.Text = "POND: " .. tostring(kini or saran or "searching...")
             bPond.BackgroundColor3 = Color3.fromRGB(28, 104, 96)
             bPond.TextColor3 = Color3.fromRGB(214, 255, 246)
         end
@@ -2413,11 +2507,11 @@ local function bangunGui()
 
     local function catBoost()
         if Config.BoostFps then
-            bBoost.Text = Boost.sudahJalan and "BOOST FPS: JALAN" or "BOOST FPS: ON"
+            bBoost.Text = Boost.sudahJalan and "BOOST FPS: RUNNING" or "BOOST FPS: ON"
             bBoost.BackgroundColor3 = Color3.fromRGB(150, 96, 24)
             bBoost.TextColor3 = Color3.fromRGB(255, 240, 220)
         else
-            bBoost.Text = Boost.sudahJalan and "BOOST: OFF (rejoin utk pulih)"
+            bBoost.Text = Boost.sudahJalan and "BOOST: OFF (rejoin to restore)"
                 or "BOOST FPS: OFF"
             bBoost.BackgroundColor3 = W.tombol
             bBoost.TextColor3 = W.redup
@@ -2499,6 +2593,30 @@ local function bangunGui()
         tulisSimpanan()
     end)
 
+    bRar.Activated:Connect(function()
+        local kini = tostring(Config.FeedRarityMin)
+        if kini == "" then kini = "-" end
+        local i = 1
+        for k, v in ipairs(RARITY_FEED) do
+            if v == kini then i = k break end
+        end
+        local pilih = RARITY_FEED[(i % #RARITY_FEED) + 1]
+        Config.FeedRarityMin = (pilih == "-") and "" or pilih
+        catFeed()
+        tulisSimpanan()
+    end)
+
+    bTabung.Activated:Connect(function()
+        local kini = tonumber(Config.FeedMulaiDari) or 0
+        local i = 1
+        for k, v in ipairs(TABUNG_FEED) do
+            if math.abs(v - kini) < 1 then i = k break end
+        end
+        Config.FeedMulaiDari = TABUNG_FEED[(i % #TABUNG_FEED) + 1]
+        catFeed()
+        tulisSimpanan()
+    end)
+
     bSpot.Activated:Connect(function()
         Config.AutoSpot = not Config.AutoSpot
         catSpot()
@@ -2560,7 +2678,15 @@ local function bangunGui()
     Gui.statistik = rinci   -- dipertahankan: ada kode lama yang menyentuhnya
 end
 
-pcall(bangunGui)
+do
+    -- Galatnya DILAPORKAN, tidak ditelan. pcall telanjang di sini pernah
+    -- menyembunyikan panel yang gagal dibangun separuh jalan: tombolnya ada
+    -- tapi tidak berlabel dan tidak pernah diperbarui, tanpa satu pun pesan.
+    local ok, err = pcall(bangunGui)
+    if not ok then
+        warn("[MozeFish] panel gagal dibangun: " .. tostring(err))
+    end
+end
 
 -- =========================================================================
 -- ANTI AFK
@@ -3159,27 +3285,31 @@ end
 --
 -- Yang tersisa: lompat, picu, balik -- dengan jendela sesingkat mungkin.
 -- =========================================================================
-local Feed = { status = "siap", naik = 0, sesi = 0, food = 0 }
+local Feed = { status = "ready", naik = 0, sesi = 0, food = 0 }
 
 
--- Jeda per stand. Terukur di akun sungguhan, 4 stand tiap percobaan:
---   0,35/0,12/0,35 -> 3/4 dalam 3,34 dtk
---   0,18/0,06/0,18 -> 4/4 dalam 1,79 dtk   <- dasar angka di bawah
---   0,10/0,05/0,10 -> 2/4 dalam 1,08 dtk
---   0,05/0,03/0,05 -> 0/4 dalam 0,58 dtk
--- Tebingnya di bawah 0,10. Angka di bawah sengaja di sisi aman; sampelnya cuma
--- 4 per sel, jadi jangan ditala ulang berdasarkan satu percobaan.
-local FEED_TIBA, FEED_TAHAN, FEED_PASCA = 0.20, 0.08, 0.20
+-- Jeda tiba per stand. Diukur ULANG 2026-08-28 dengan posisi DITAHAN tiap
+-- frame dan tanpa script lain ikut menarik karakter:
+--
+--   0,20 dtk -> 3/6      0,35 dtk -> 6/6      0,60 dtk -> 6/6
+--
+-- 0,20 yang dipakai sebelumnya memang di bawah ambang -- itu sebab "kadang ga
+-- ngefeed". Pengukuran pertama yang seolah membenarkan 0,18 cuma 4 sampel per
+-- sel dan menyesatkan.
+local FEED_TIBA, FEED_TAHAN, FEED_PASCA = 0.35, 0.08, 0.25
 
--- 793200 -> "793.2K". Dipakai di status panel: angka food mentah 10 digit
--- tidak terbaca di baris selebar 184 piksel.
-local function angkaRingkas(n)
-    n = tonumber(n) or 0
-    local satuan = { { 1e12, "T" }, { 1e9, "B" }, { 1e6, "M" }, { 1e3, "K" } }
-    for _, s in ipairs(satuan) do
-        if n >= s[1] then return string.format("%.1f%s", n / s[1], s[2]) end
-    end
-    return string.format("%d", n)
+-- Menahan karakter di satu titik selama beberapa saat.
+--
+-- KENAPA WAJIB: terukur, script lain yang sedang auto-fish menyeret karakter
+-- kembali ke kolam **0,8 detik** sesudah kita mendarat di plot -- jauh sebelum
+-- tekanan sempat diterima server. Sekali tulis CFrame tidak cukup; harus
+-- ditulis ulang tiap frame selama menunggu DAN selama menekan.
+local function tahanDi(cf)
+    local conn = game:GetService("RunService").Heartbeat:Connect(function()
+        local hrp = PemainLokal.Character and PemainLokal.Character:FindFirstChild("HumanoidRootPart")
+        if hrp then hrp.CFrame = cf end
+    end)
+    return function() pcall(function() conn:Disconnect() end) end
 end
 
 local function plotSendiri()
@@ -3214,7 +3344,7 @@ end
 -- mengganggu mancing daripada sepuluh lompatan satu level. MaxLevelUp SENGAJA
 -- tidak dipakai -- terukur 2,5 MILIAR sekali tekan, itu menguras seluruh
 -- tabungan food dalam satu gerakan dan tidak bisa dibatalkan.
-local function feedDaftar(mode)
+local function feedDaftar(mode, tipePaksa)
     local plot = plotSendiri()
     if not plot then return {} end
 
@@ -3227,6 +3357,10 @@ local function feedDaftar(mode)
     end
 
     local hasil = {}
+    -- Dicacah supaya status bisa menyebut APA yang mengosongkan daftar. Tanpa
+    -- ini "nothing to level" sama saja bilang "entah" -- dan itu persis yang
+    -- bikin bingung saat kandidatnya sebenarnya ada tapi tersaring.
+    Feed.gugur = { rarity = 0, level = 0, tanpaModel = 0 }
     local function sapu(induk)
         if not induk then return end
         for _, node in ipairs(induk:GetChildren()) do
@@ -3240,7 +3374,7 @@ local function feedDaftar(mode)
                 -- Tipe prompt ditentukan pilihan pemain (1 / 10 / max), bukan
                 -- ditebak. "1" penting untuk mode rata: LevelUp10 melompatkan
                 -- satu karakter 10 level sekaligus dan merusak perataan.
-                local mau = tostring(Config.FeedJumlah or "1")
+                local mau = tostring(tipePaksa or Config.FeedJumlah or "1")
                 local TIPE = { ["1"] = "LevelUp", ["10"] = "LevelUp10", max = "MaxLevelUp" }
                 local tipeMau = TIPE[mau] or "LevelUp"
                 local pilih, murah
@@ -3264,6 +3398,31 @@ local function feedDaftar(mode)
                 end
                 if pilih then
                     local kar = perStand[tostring(pilih.prompt:GetAttribute("StandId"))]
+                    if not kar then Feed.gugur.tanpaModel = Feed.gugur.tanpaModel + 1 end
+                    -- Dua saringan, keduanya dipakai di SEMUA mode.
+                    --
+                    -- Rarity: nama di atribut model dibandingkan lewat URUT_RARITY.
+                    -- Rarity yang tidak dikenal dapat peringkat 0, jadi ia otomatis
+                    -- tersaring keluar begitu ambangnya diisi -- arah gagal yang
+                    -- benar, karena memberi makan yang tidak dikenali itu justru
+                    -- membakar food di tempat yang tidak diminta.
+                    --
+                    -- Level: karakter yang sudah mentok tidak boleh dibayari lagi.
+                    if kar then
+                        local ambang = URUT_RARITY[tostring(Config.FeedRarityMin)]
+                        if ambang and (URUT_RARITY[tostring(kar:GetAttribute("Rarity"))] or 0) < ambang then
+                            kar = nil
+                            Feed.gugur.rarity = Feed.gugur.rarity + 1
+                        end
+                    end
+                    if kar then
+                        local batas = tonumber(Config.FeedLevelMaks) or 0
+                        if batas <= 0 and mode == "rata200" then batas = 200 end
+                        if batas > 0 and (tonumber(kar:GetAttribute("Level")) or 0) >= batas then
+                            kar = nil
+                            Feed.gugur.level = Feed.gugur.level + 1
+                        end
+                    end
                     if kar then
                         hasil[#hasil + 1] = {
                             node = node, prompt = pilih.prompt, kar = kar,
@@ -3293,14 +3452,9 @@ local function feedUrut(daftar, mode)
             return a.cps > b.cps
         end)
     elseif mode == "rata200" then
-        -- Yang sudah lewat batas dibuang dulu, sisanya diratakan dari bawah.
-        local sisa = {}
-        local batas = tonumber(Config.FeedBatas) or 200
-        for _, x in ipairs(daftar) do
-            if x.level < batas then sisa[#sisa + 1] = x end
-        end
-        table.sort(sisa, function(a, b) return a.level < b.level end)
-        return sisa
+        -- Penyaringan batas level sudah dilakukan di feedDaftar (berlaku untuk
+        -- SEMUA mode), jadi di sini tinggal mengurutkan dari yang terendah.
+        table.sort(daftar, function(a, b) return a.level < b.level end)
     else
         table.sort(daftar, function(a, b) return a.level < b.level end)
     end
@@ -3312,12 +3466,13 @@ local function feedSesi()
     if not hrp then return end
 
     local mode = tostring(Config.FeedMode)
-    local daftar = feedUrut(feedDaftar(mode), mode)
-    if #daftar == 0 then
-        Feed.status = "tidak ada yang bisa dinaikkan"
-        return
-    end
-
+    -- CATATAN URUTAN: pendaftaran kandidat sengaja TIDAK dilakukan di sini.
+    -- Dari kolam, model karakter di plot bisa belum termuat streaming, dan
+    -- mendaftar duluan membuat sesi pulang dengan "tidak ada yang bisa
+    -- dinaikkan" padahal sebenarnya ada. Gerbang food di bawah tidak butuh
+    -- daftar, jadi ia diperiksa lebih dulu -- dan itu tetap mencegah lompatan
+    -- sia-sia saat food memang belum cukup.
+    local daftar
     local sisaMin = tonumber(Config.FeedSisaFood) or 0
     local food = tonumber(PemainLokal:GetAttribute("FoodNumber")) or 0
 
@@ -3326,39 +3481,157 @@ local function feedSesi()
     -- yang lain supaya karakter tidak meninggalkan kolam tanpa hasil.
     local mulaiDari = tonumber(Config.FeedMulaiDari) or 0
     if mulaiDari > 0 and food < mulaiDari then
-        Feed.status = string.format("menabung %s / %s", angkaRingkas(food), angkaRingkas(mulaiDari))
+        Feed.status = "saving " .. angkaRingkas(food) .. "/" .. angkaRingkas(mulaiDari)
         return
     end
 
+    -- JATAH ADAPTIF.
+    --
+    -- Dua bagian: (a) sebanyak food yang MASUK sejak sesi lalu, supaya belanja
+    -- mengimbangi produksi dan simpanan berhenti tumbuh; (b) sebagian dari
+    -- simpanan yang sudah terlanjur menumpuk, supaya ikut terkikis.
+    --
+    -- Produksinya diukur sendiri, bukan ditebak: selisih food antar sesi
+    -- DITAMBAH belanja sesi lalu = food yang masuk. Angka tetap tidak mungkin
+    -- benar karena produksi ikut naik seiring garden dan boost pemain.
+    local sekarang = os.clock()
+    if Feed.tSesi and Feed.foodSesi then
+        local lewat = sekarang - Feed.tSesi
+        if lewat > 1 then
+            local masuk = (food - Feed.foodSesi) + (Feed.belanjaSesi or 0)
+            local laju = math.max(0, masuk / lewat)
+            -- Dihaluskan: satu sesi yang kebetulan sepi tidak boleh menjatuhkan
+            -- perkiraan produksi untuk sesi-sesi berikutnya.
+            Feed.produksi = Feed.produksi and (Feed.produksi + 0.4 * (laju - Feed.produksi)) or laju
+        end
+    end
+    Feed.tSesi, Feed.foodSesi, Feed.belanjaSesi = sekarang, food, 0
+
+    local jeda = tonumber(Config.FeedJeda) or 90
+    local surplus = math.max(0, food - sisaMin)
+    local jatah
+    if mulaiDari > 0 then
+        -- Ambang tabungan dipasang berarti pemain SENGAJA menumpuk dulu. Kalau
+        -- sesudah tercapai belanjanya cuma menetes, ambangnya jadi tidak ada
+        -- gunanya: food langsung menyentuh ambang lagi dan karakter bolak-balik
+        -- meninggalkan kolam. Jadi begitu tercapai, surplusnya dibelanjakan.
+        jatah = surplus
+    else
+        jatah = (Feed.produksi or 0) * jeda + surplus * (tonumber(Config.FeedKikis) or 0.2)
+    end
+    -- Pagar atas tetap dihormati kalau pemain memang menurunkannya.
+    local pagar = (tonumber(Config.FeedMaksPecahan) or 1) * food
+    if jatah > pagar then jatah = pagar end
+    if jatah < 0 then jatah = 0 end
+
+    local kolamAsal = S.pondName or Kolam.pilihan
+    local asal = hrp.CFrame
+    local naik, dicoba, dilewati, belanja = 0, 0, 0, 0
+
+    -- PINDAH DULU KE PLOT, BARU MENDAFTAR ULANG.
+    --
+    -- KOREKSI terukur 2026-08-28: dari kolam, `StreamingEnabled` melepas model
+    -- karakter di plot. Terbaca **33 prompt LevelUp siap tapi NOL model
+    -- `Placed_`** -- dan karena kandidat dicocokkan ke karakter lewat StandId,
+    -- semuanya gugur dan sesi pulang tanpa memberi makan sama sekali. Itulah
+    -- sebab "udah aktif tapi ga ngasih makan padahal food 1,3 M".
+    --
+    -- Sebelumnya sempat saya simpulkan "bukan streaming" karena saat diperiksa
+    -- modelnya kebetulan termuat. Yang benar: tergantung posisi dan waktu.
+    local pusat = plotSendiri()
+    pusat = pusat and (pusat:FindFirstChild("Home") or pusat:FindFirstChild("CashPerSecond"))
+    if pusat and pusat:IsA("BasePart") then
+        local lepasPusat = tahanDi(CFrame.new(pusat.Position + Vector3.new(0, 5, 0)))
+        -- Tunggu model muncul, jangan tunggu waktu tetap: lamanya streaming
+        -- ikut koneksi, dan angka mati akan terlalu lama atau terlalu pendek.
+        -- Menunggu jumlahnya BERHENTI BERTAMBAH, bukan menunggu model pertama.
+        --
+        -- Versi sebelumnya berhenti begitu satu model muncul, dan hasilnya
+        -- terbaca di panel: "plot not loaded (32)" -- 32 dari 33 prompt tidak
+        -- punya pasangan karena sisanya belum sempat masuk. Streaming terukur
+        -- perlu sampai ~4 detik untuk memuat seluruhnya.
+        local batas = os.clock() + 8
+        local sebelumnya, stabilSejak = -1, nil
+        while os.clock() < batas do
+            local n = 0
+            local pl = plotSendiri()
+            if pl then
+                for _, m in ipairs(pl:GetChildren()) do
+                    if m:IsA("Model") and tostring(m.Name):sub(1, 7) == "Placed_" then n = n + 1 end
+                end
+            end
+            if n > 0 and n == sebelumnya then
+                stabilSejak = stabilSejak or os.clock()
+                if (os.clock() - stabilSejak) >= 0.6 then break end
+            else
+                stabilSejak = nil
+            end
+            sebelumnya = n
+            task.wait(0.15)
+        end
+        lepasPusat()
+    end
+    daftar = feedUrut(feedDaftar(mode), mode)
+
     -- MENABUNG. Jatah sekali sesi dibatasi sepersekian dari food yang dipegang,
     -- BUKAN per tekan. Dengan begitu simpanan tetap tumbuh: produksi menambah
-    -- terus sementara tiap sesi hanya boleh mengambil sebagian kecil.
-    --
-    -- Kalau yang termurah pun sudah lebih mahal dari jatah, sesi ini SENGAJA
-    -- tidak melakukan apa-apa dan menunggu food terkumpul. Itu perilaku yang
-    -- diminta: jangan feed terus-terusan.
-    local jatah = (tonumber(Config.FeedMaksPecahan) or 0.05) * food
+    -- terus sementara tiap sesi hanya boleh mengambil sebagian kecil. Kalau yang
+    -- termurah pun di atas jatah, sesi ini sengaja tidak melakukan apa-apa.
     local termurah
     for _, x in ipairs(daftar) do
         if (food - x.harga) >= sisaMin and (not termurah or x.harga < termurah) then
             termurah = x.harga
         end
     end
-    if not termurah then
-        Feed.status = string.format("food kurang (%s)", angkaRingkas(food))
-        return
+    -- MUNDUR KE 1x kalau pilihan pemain tidak terbeli satu pun.
+    --
+    -- Terukur: dengan "10x" dan saringan Celestial+, harga Level Up 10 di
+    -- karakter itu 1,3-2,8 MILIAR sementara food 1,86 M -- tidak ada yang
+    -- terbeli, dan sesi pulang kosong terus walau food menumpuk. Naik satu
+    -- level jelas lebih baik daripada tidak naik sama sekali.
+    if (not termurah) and tostring(Config.FeedJumlah) ~= "1" then
+        daftar = feedUrut(feedDaftar(mode, "1"), mode)
+        for _, x in ipairs(daftar) do
+            if (food - x.harga) >= sisaMin and (not termurah or x.harga < termurah) then
+                termurah = x.harga
+            end
+        end
+        if termurah then Feed.mundur = true end
     end
-    if termurah > jatah then
-        Feed.status = string.format("menabung: termurah %s > jatah %s",
-            angkaRingkas(termurah), angkaRingkas(jatah))
+
+    if (#daftar == 0) or (not termurah) or (termurah > jatah) then
+        hrp.CFrame = asal
+        if #daftar == 0 then
+            local g = Feed.gugur or {}
+            if (g.tanpaModel or 0) > 0 then
+                Feed.status = "plot not loaded (" .. g.tanpaModel .. ")"
+            elseif (g.rarity or 0) > 0 then
+                Feed.status = "rarity filter cut " .. g.rarity
+            elseif (g.level or 0) > 0 then
+                Feed.status = "level cap cut " .. g.level
+            else
+                Feed.status = "nothing to level"
+            end
+        elseif not termurah then
+            Feed.status = "not enough food"
+        else
+            Feed.status = "saving " .. angkaRingkas(termurah) .. ">" .. angkaRingkas(jatah)
+        end
+        -- Sudah terlanjur meninggalkan kolam, jadi tetap dinyalakan ulang.
+        pastikanMancing(kolamAsal)
         return
     end
 
-    local kolamAsal = S.pondName or Kolam.pilihan
-    local asal = hrp.CFrame
-    local naik, dicoba, dilewati, belanja = 0, 0, 0, 0
-
-    for i = 1, math.min(tonumber(Config.FeedPerSesi) or 5, #daftar) do
+    -- Menelusuri SELURUH daftar, tapi hanya MENEKAN sebanyak FeedPerSesi.
+    --
+    -- KOREKSI: versi sebelumnya memotong daftar ke 5 teratas lebih dulu. Di
+    -- mode "cps" lima teratas justru yang paling mahal, semuanya kena saringan
+    -- jatah, dan sesi pulang tanpa menekan apa pun -- terlihat seperti auto
+    -- feed mati padahal food menumpuk. Batasnya harus pada JUMLAH TEKAN, bukan
+    -- pada berapa kandidat yang boleh dilihat.
+    local maksTekan = tonumber(Config.FeedPerSesi) or 5
+    for i = 1, #daftar do
+        if dicoba >= maksTekan then break end
         local x = daftar[i]
         food = tonumber(PemainLokal:GetAttribute("FoodNumber")) or 0
 
@@ -3381,7 +3654,7 @@ local function feedSesi()
                 or x.node:FindFirstChild("PromptPart") or x.prompt.Parent
             if plat and plat:IsA("BasePart") then
                 local l0 = tonumber(x.kar:GetAttribute("Level")) or 0
-                hrp.CFrame = CFrame.new(plat.Position + Vector3.new(0, 3, 0))
+                local lepas = tahanDi(CFrame.new(plat.Position + Vector3.new(0, 3, 0)))
                 -- Ditunggu supaya posisi kita sampai di SERVER. Prompt.Enabled
                 -- bukan acuan: terukur ia menyala 0-217 ms sesudah teleport
                 -- sementara picuannya tetap ditolak -- yang dipakai server
@@ -3394,6 +3667,7 @@ local function feedSesi()
                 task.wait(FEED_TAHAN)
                 pcall(function() x.prompt:InputHoldEnd() end)
                 task.wait(FEED_PASCA)
+                lepas()
                 -- Kenaikan diambil dari SELISIH LEVEL sungguhan, bukan dari
                 -- taksiran per tipe prompt: "max" tidak mengumumkan berapa
                 -- level yang didapat, jadi menaksirnya pasti salah.
@@ -3410,8 +3684,10 @@ local function feedSesi()
     Feed.naik = Feed.naik + naik
     Feed.sesi = Feed.sesi + 1
     Feed.food = Feed.food + belanja
-    Feed.status = string.format("+%d level, %d tekan, %s%s", naik, dicoba,
-        angkaRingkas(belanja), dilewati > 0 and (", " .. dilewati .. " dilewati") or "")
+    Feed.belanjaSesi = belanja
+    Feed.status = string.format("+%d lvl %s%s", naik, angkaRingkas(belanja),
+        Feed.mundur and " (1x)" or "")
+    Feed.mundur = nil
 
     -- Tanpa syarat: karakter baru saja meninggalkan kolam.
     pastikanMancing(kolamAsal)
@@ -3427,7 +3703,7 @@ end
 -- Yang dituju penanda TPPONDAREA*, bukan kolamnya sendiri -- mendarat di
 -- tengah air membuat karakter berenang dan lemparannya ditolak.
 -- =========================================================================
-local Spot = { status = "siap", pindah = 0 }
+local Spot = { status = "ready", pindah = 0 }
 
 -- Benar kalau sudah sekian detik tidak ada satu pun tangkapan masuk.
 --
@@ -3440,21 +3716,39 @@ local function mancingMacet(batas)
     return (os.clock() - S.tPanen) > (batas or 20)
 end
 
+-- Benar kalau karakter memang JAUH dari kolam yang disebut.
+--
+-- KENAPA PERLU: `S.pondName` merekam kolam yang TERAKHIR DITUJU, bukan tempat
+-- kita berdiri -- ia diisi oleh nyalakanMancing() dan oleh event `Started`.
+-- Akibatnya auto spot pernah melapor "sudah di PONDAREA2" padahal karakter
+-- berada **564 stud** dari sana dengan NOL tangkapan, dan tidak pernah
+-- berangkat. Nama tidak boleh dipakai sebagai bukti posisi.
+--
+-- Ambang 120 stud: mancing terbukti jalan dari 41 stud, jadi 120 masih jauh
+-- di atas jarak kerja yang wajar dan tidak akan memicu perpindahan palsu.
+local function jauhDariKolam(nama)
+    local part = partKolam(nama)
+    if not part then return true end
+    local hrp = PemainLokal.Character and PemainLokal.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+    return (part.Position - hrp.Position).Magnitude > 120
+end
+
 local function spotSesi()
     local nama = Kolam.pilihan
-    if not nama then Spot.status = "belum ada saran" return end
+    if not nama then Spot.status = "no suggestion" return end
 
-    if nama == S.pondName then
+    if nama == S.pondName and not jauhDariKolam(nama) then
         if mancingMacet(20) then
             -- Kolamnya sudah benar, yang mati pancingannya. Nyalakan ulang di
             -- tempat, TANPA memindahkan karakter -- gerakan yang tidak perlu
             -- justru membatalkan pancingan yang baru saja dipasang.
             if pastikanMancing(nama) then
-                Spot.status = "nyalakan ulang di " .. nama
+                Spot.status = "restarted at " .. nama
                 catat("auto spot: mancing macet, dinyalakan ulang di %s", nama)
             end
         else
-            Spot.status = "sudah di " .. nama
+            Spot.status = "already at " .. nama
         end
         return
     end
@@ -3463,7 +3757,7 @@ local function spotSesi()
     if not pijakan then
         -- Kolam event sering tidak punya penanda TP. Lebih baik diam daripada
         -- menebak koordinat lalu menjatuhkan pemain ke tempat asing.
-        Spot.status = nama .. ": tanpa penanda TP"
+        Spot.status = nama .. ": no TP marker"
         return
     end
 
@@ -3475,10 +3769,10 @@ local function spotSesi()
     task.wait(1.2)
     if pastikanMancing(nama) then
         Spot.pindah = Spot.pindah + 1
-        Spot.status = "pindah ke " .. nama
+        Spot.status = "moved to " .. nama
         catat("auto spot: pindah ke %s", nama)
     else
-        Spot.status = "gagal mulai di " .. nama
+        Spot.status = "failed to start at " .. nama
     end
 end
 
@@ -3487,6 +3781,7 @@ task.spawn(function()
         task.wait(tonumber(Config.FeedJeda) or 90)
         if Config.AutoFeed then
             pakaiGerak("feed", feedSesi)
+            Gui.statusFeed = Feed.status
             if Gui.ada then pcall(Gui.catFeed) end
         end
     end
