@@ -319,10 +319,20 @@ local Config = {
     -- -- itu pertukaran yang nyata, bukan sekadar angka bebas.
     -- BATAS ATAS tekan per sesi, bukan target. Berapa yang benar-benar ditekan
     -- diputuskan jatah adaptif di bawah; angka ini cuma pagar waktu.
-    FeedPerSesi     = tonumber(U.FeedPerSesi) or 15,
+    FeedPerSesi     = tonumber(U.FeedPerSesi) or 120,
+    -- PAGAR SEBENARNYA: berapa detik paling lama karakter boleh berada di plot
+    -- dalam satu sesi. Jumlah tekan bukan pagar yang benar -- kalau harganya
+    -- kecil, "belanjakan sampai habis" bisa berarti ratusan tekan dan
+    -- bermenit-menit meninggalkan kolam.
+    FeedMaksDetik   = tonumber(U.FeedMaksDetik) or 25,
     -- Berapa bagian SIMPANAN yang dikikis tiap sesi, di atas jatah untuk
-    -- mengimbangi produksi. 0,2 = seperlima simpanan per sesi.
-    FeedKikis       = tonumber(U.FeedKikis) or 0.2,
+    -- mengimbangi produksi. Default 1 = HABISKAN.
+    --
+    -- Sempat 0,2, dan itu yang menyisakan ~1 miliar walau sesinya sudah
+    -- diizinkan berputar sampai tidak ada lagi yang terbeli: yang menghentikan
+    -- bukan keterjangkauan, tapi jatahnya sendiri. Karena rebirth menghapus
+    -- seluruh food, menyisakan simpanan justru membuangnya.
+    FeedKikis       = tonumber(U.FeedKikis) or 1,
     -- Sisakan food minimal sekian. 0 = pakai sampai habis.
     FeedSisaFood    = tonumber(U.FeedSisaFood) or 0,
     -- Batas level untuk mode "rata200".
@@ -3247,8 +3257,67 @@ end
 -- lemparan pertama sering ditolak karena posisi kita belum sampai di server,
 -- dan kalau tidak diulang panen berhenti diam-diam sampai pemain sadar sendiri
 -- -- persis keluhan "abis ngefeed kadang ga mancing".
+-- Menahan karakter di satu titik selama beberapa saat.
+--
+-- KENAPA WAJIB: terukur, script lain yang sedang auto-fish menyeret karakter
+-- kembali ke kolam **0,8 detik** sesudah kita mendarat di plot -- jauh sebelum
+-- tekanan sempat diterima server. Sekali tulis CFrame tidak cukup; harus
+-- ditulis ulang tiap frame selama menunggu DAN selama menekan.
+local function tahanDi(cf)
+    local conn = game:GetService("RunService").Heartbeat:Connect(function()
+        local hrp = PemainLokal.Character and PemainLokal.Character:FindFirstChild("HumanoidRootPart")
+        if hrp then hrp.CFrame = cf end
+    end)
+    return function() pcall(function() conn:Disconnect() end) end
+end
+
+-- Benar kalau karakter memang JAUH dari kolam yang disebut.
+--
+-- KENAPA PERLU: `S.pondName` merekam kolam yang TERAKHIR DITUJU, bukan tempat
+-- kita berdiri -- ia diisi oleh nyalakanMancing() dan oleh event `Started`.
+-- Akibatnya auto spot pernah melapor "sudah di PONDAREA2" padahal karakter
+-- berada **564 stud** dari sana dengan NOL tangkapan, dan tidak pernah
+-- berangkat. Nama tidak boleh dipakai sebagai bukti posisi.
+--
+-- Ambang 120 stud: mancing terbukti jalan dari 41 stud, jadi 120 masih jauh
+-- di atas jarak kerja yang wajar dan tidak akan memicu perpindahan palsu.
+local function jauhDariKolam(nama)
+    local part = partKolam(nama)
+    if not part then return true end
+    local hrp = PemainLokal.Character and PemainLokal.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+    return (part.Position - hrp.Position).Magnitude > 120
+end
+
+-- Memindahkan karakter ke penanda TP kolam. Dipakai saat pemulihan, bukan cuma
+-- saat pindah kolam.
+--
+-- KENAPA: pemulihan lama hanya menembak ulang remote tanpa pernah MEMINDAHKAN
+-- karakter. Kalau yang salah justru posisinya, ia mengulang selamanya --
+-- dan game menampilkan "Move closer to the Pond!" sepanjang malam. Terjadi
+-- sungguhan: ditinggal tidur, paginya tidak memancing sama sekali.
+--
+-- Paling terasa di kolam yang jauh dari plot (lava): sesudah sesi feed,
+-- mengembalikan CFrame apa adanya ternyata tidak selalu mendaratkan kita cukup
+-- dekat menurut SERVER.
+local function keTitikKolam(namaKolam)
+    local pijakan = partKolam(namaKolam, true) or partKolam(namaKolam)
+    if not pijakan then return false end
+    local hrp = PemainLokal.Character and PemainLokal.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+    local lepas = tahanDi(CFrame.new(pijakan.Position + Vector3.new(0, 4, 0)))
+    -- Ditahan sebentar supaya posisinya sampai di server sebelum melempar.
+    task.wait(1.2)
+    lepas()
+    return true
+end
+
 local function pastikanMancing(namaKolam, maks)
-    for _ = 1, (maks or 5) do
+    for percobaan = 1, (maks or 5) do
+        -- Mulai percobaan ketiga, PINDAHKAN dulu. Dua percobaan pertama sengaja
+        -- tidak memindahkan: kalau posisinya memang sudah benar, teleport yang
+        -- tidak perlu justru membatalkan pancingan yang baru dipasang.
+        if percobaan >= 3 then keTitikKolam(namaKolam) end
         local sebelum = S.tSinyalBaik
         if nyalakanMancing(namaKolam) then
             -- Terukur: sesudah kembali ke kolam, `Started` datang dalam 0,06
@@ -3297,20 +3366,6 @@ local Feed = { status = "ready", naik = 0, sesi = 0, food = 0 }
 -- ngefeed". Pengukuran pertama yang seolah membenarkan 0,18 cuma 4 sampel per
 -- sel dan menyesatkan.
 local FEED_TIBA, FEED_TAHAN, FEED_PASCA = 0.35, 0.08, 0.25
-
--- Menahan karakter di satu titik selama beberapa saat.
---
--- KENAPA WAJIB: terukur, script lain yang sedang auto-fish menyeret karakter
--- kembali ke kolam **0,8 detik** sesudah kita mendarat di plot -- jauh sebelum
--- tekanan sempat diterima server. Sekali tulis CFrame tidak cukup; harus
--- ditulis ulang tiap frame selama menunggu DAN selama menekan.
-local function tahanDi(cf)
-    local conn = game:GetService("RunService").Heartbeat:Connect(function()
-        local hrp = PemainLokal.Character and PemainLokal.Character:FindFirstChild("HumanoidRootPart")
-        if hrp then hrp.CFrame = cf end
-    end)
-    return function() pcall(function() conn:Disconnect() end) end
-end
 
 local function plotSendiri()
     local pp = workspace:FindFirstChild("PlayerPlots")
@@ -3629,9 +3684,24 @@ local function feedSesi()
     -- jatah, dan sesi pulang tanpa menekan apa pun -- terlihat seperti auto
     -- feed mati padahal food menumpuk. Batasnya harus pada JUMLAH TEKAN, bukan
     -- pada berapa kandidat yang boleh dilihat.
-    local maksTekan = tonumber(Config.FeedPerSesi) or 5
+    -- BELANJAKAN SAMPAI BENAR-BENAR HABIS.
+    --
+    -- Dipindai ULANG tiap putaran: begitu satu stand naik level, harganya ikut
+    -- naik, jadi daftar dari putaran sebelumnya sudah basi. Tanpa pemindaian
+    -- ulang, sesi berhenti sesudah satu lintasan dan menyisakan food yang
+    -- sebenarnya masih cukup -- itu sebabnya sempat tersisa ~1 miliar.
+    --
+    -- Berhenti kalau: tidak ada lagi yang terbeli DALAM SATU PUTARAN PENUH,
+    -- atau pagar waktu habis, atau pagar tekan tersentuh.
+    local maksTekan = tonumber(Config.FeedPerSesi) or 120
+    local batasWaktu = os.clock() + (tonumber(Config.FeedMaksDetik) or 25)
+    local putaran = 0
+    repeat
+    putaran = putaran + 1
+    local adaYangTerbeli = false
+    if putaran > 1 then daftar = feedUrut(feedDaftar(mode), mode) end
     for i = 1, #daftar do
-        if dicoba >= maksTekan then break end
+        if dicoba >= maksTekan or os.clock() > batasWaktu then break end
         local x = daftar[i]
         food = tonumber(PemainLokal:GetAttribute("FoodNumber")) or 0
 
@@ -3675,21 +3745,32 @@ local function feedSesi()
                 if l1 ~= l0 then
                     naik = naik + (l1 - l0)
                     belanja = belanja + x.harga
+                    adaYangTerbeli = true
                 end
             end
         end
     end
+    until (not adaYangTerbeli) or dicoba >= maksTekan or os.clock() > batasWaktu
 
     hrp.CFrame = asal
     Feed.naik = Feed.naik + naik
     Feed.sesi = Feed.sesi + 1
     Feed.food = Feed.food + belanja
     Feed.belanjaSesi = belanja
-    Feed.status = string.format("+%d lvl %s%s", naik, angkaRingkas(belanja),
-        Feed.mundur and " (1x)" or "")
+    Feed.status = string.format("+%d lvl %s%s%s", naik, angkaRingkas(belanja),
+        Feed.mundur and " (1x)" or "",
+        (os.clock() > batasWaktu) and " [waktu]" or "")
     Feed.mundur = nil
 
     -- Tanpa syarat: karakter baru saja meninggalkan kolam.
+    --
+    -- Kalau pendaratan balik ternyata masih jauh dari kolam, pulang lewat
+    -- penanda TP -- jalur yang sama dengan auto spot dan sudah terbukti
+    -- (564 stud -> 41 stud, tangkapan lanjut). Mengembalikan CFrame apa adanya
+    -- saja tidak cukup untuk kolam yang jauh dari plot.
+    if kolamAsal and jauhDariKolam(kolamAsal) then
+        keTitikKolam(kolamAsal)
+    end
     pastikanMancing(kolamAsal)
 end
 
@@ -3714,24 +3795,6 @@ local Spot = { status = "ready", pindah = 0 }
 local function mancingMacet(batas)
     if not S.tPanen then return true end
     return (os.clock() - S.tPanen) > (batas or 20)
-end
-
--- Benar kalau karakter memang JAUH dari kolam yang disebut.
---
--- KENAPA PERLU: `S.pondName` merekam kolam yang TERAKHIR DITUJU, bukan tempat
--- kita berdiri -- ia diisi oleh nyalakanMancing() dan oleh event `Started`.
--- Akibatnya auto spot pernah melapor "sudah di PONDAREA2" padahal karakter
--- berada **564 stud** dari sana dengan NOL tangkapan, dan tidak pernah
--- berangkat. Nama tidak boleh dipakai sebagai bukti posisi.
---
--- Ambang 120 stud: mancing terbukti jalan dari 41 stud, jadi 120 masih jauh
--- di atas jarak kerja yang wajar dan tidak akan memicu perpindahan palsu.
-local function jauhDariKolam(nama)
-    local part = partKolam(nama)
-    if not part then return true end
-    local hrp = PemainLokal.Character and PemainLokal.Character:FindFirstChild("HumanoidRootPart")
-    if not hrp then return false end
-    return (part.Position - hrp.Position).Magnitude > 120
 end
 
 local function spotSesi()
