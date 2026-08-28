@@ -44,9 +44,6 @@ Config.Boost = (SIMPAN.Boost == true)
 Config.Tiket = (SIMPAN.Tiket == true)
 -- Kosong = siapa saja. Diisi = HANYA nama itu (pisah koma) yang diterima.
 Config.TiketDari = type(SIMPAN.TiketDari) == "string" and SIMPAN.TiketDari or ""
--- Pindah server saat semua target habis. Default MATI: salah setelan
--- membuat bot berputar pindah server tanpa pernah sempat membeli.
-Config.Hop = (SIMPAN.Hop == true)
 -- Dideklarasikan maju: dipakai handler tombol yang dibuat sebelum badannya ada.
 -- `local function` dua kali menghasilkan DUA fungsi berbeda, dan yang dipegang
 -- tombol adalah yang kosong -- setelan tidak akan pernah tersimpan.
@@ -63,6 +60,50 @@ end
 local function bacaStok()
     local ok, d = pcall(function() return DS:GetData() end)
     return (ok and type(d) == "table" and d.EventShopStock) or {}
+end
+
+-- =========================================================================
+-- BEE EGG SHOP
+--
+-- Toko ini TIDAK ada di EventShopStock; stoknya di cabang datanya sendiri dan
+-- belinya lewat RemoteFunction, bukan RemoteEvent. Supaya tidak perlu jalur
+-- kedua di seluruh panel, ia dipasang sebagai satu "toko" semu dan semua
+-- pembacaan/pembelian lewat dua fungsi kecil di bawah.
+--
+-- Terukur 2026-08-29 pada akun hidup:
+--   BuyBeeEggStock:InvokeServer("Common Bee Egg") -> boolean true
+--   stok 6 -> 5, dari jarak 92 stud
+-- Jadi server TIDAK memvalidasi jarak -- bot tidak perlu didekatkan ke toko.
+-- =========================================================================
+local BEE = "Bee Egg Shop"
+local BeeRF = (function()
+    local svc = RS.GameEvents:FindFirstChild("BeeColonyEggShopService")
+    return svc and svc:FindFirstChild("BuyBeeEggStock") or nil
+end)()
+
+local function bacaStokBee()
+    local ok, d = pcall(function() return DS:GetData() end)
+    local b = ok and type(d) == "table" and d.BeeEggShopStock
+    return (type(b) == "table" and type(b.Stocks) == "table") and b.Stocks or {}
+end
+
+-- Tabel Stocks satu toko, apa pun jenisnya.
+local function stoksDari(semua, toko)
+    if toko == BEE then return bacaStokBee() end
+    local s2 = semua[toko]
+    return s2 and s2.Stocks or nil
+end
+
+-- Satu pembelian. Bee memakai InvokeServer yang MEMBALAS boolean, jadi
+-- kegagalan ketahuan; event shop memakai FireServer yang diam.
+local function tembakBeli(toko, nama)
+    if toko == BEE then
+        if not BeeRF then return false end
+        local ok, r = pcall(function() return BeeRF:InvokeServer(nama) end)
+        return ok and r == true
+    end
+    pcall(function() Remote:FireServer(nama, toko) end)
+    return true
 end
 
 -- Harga & mata uang item, dari katalog. Toko tanpa katalog mengembalikan nil
@@ -141,6 +182,33 @@ do
         Pilih[toko] = {}
         for _, x in ipairs(a) do Pilih[toko][x.nama] = false end
     end
+
+    -- Bee Egg Shop ditambahkan TERAKHIR supaya nomor "Shop N" toko lain tidak
+    -- bergeser -- pilihan tersimpan pengguna dikunci pada nama toko, tapi
+    -- nomor yang berubah-ubah membingungkan saat dibaca.
+    if BeeRF then
+        -- Toko bee tidak punya katalog, jadi daftarnya hanya bisa dari stok yang
+        -- SEDANG ada. Itu masalah: item yang kebetulan habis saat script mulai
+        -- tidak akan pernah muncul di panel, sehingga tidak bisa dicentang, dan
+        -- restock berikutnya terlewat diam-diam.
+        --
+        -- Benih di bawah dua nama yang benar-benar terlihat di toko (terukur
+        -- 2026-08-29). Nama toko bee TIDAK sama dengan nama di PetRegistry --
+        -- registry cuma punya "Bee Egg"/"Hive Egg", bukan kedua nama ini --
+        -- jadi tidak ada sumber lain untuk mengambilnya.
+        local nama = { ["Common Bee Egg"] = true, ["Transcendent Bee Egg"] = true }
+        for item in pairs(bacaStokBee()) do nama[item] = true end
+
+        local a = {}
+        for item in pairs(nama) do a[#a + 1] = { nama = item, urut = 999 } end
+        table.sort(a, function(x, y) return x.nama < y.nama end)
+        if #a > 0 then
+            TOKO[#TOKO + 1] = BEE
+            Daftar[BEE] = a
+            Pilih[BEE] = {}
+            for _, x in ipairs(a) do Pilih[BEE][x.nama] = false end
+        end
+    end
 end
 
 simpanConfig = function()
@@ -149,7 +217,6 @@ simpanConfig = function()
         writefile(BERKAS, HttpService:JSONEncode({
             Aktif = Config.Aktif, Boost = Config.Boost, Pilih = Pilih,
             Tiket = Config.Tiket, TiketDari = Config.TiketDari,
-            Hop = Config.Hop,
         }))
     end)
 end
@@ -472,164 +539,6 @@ task.spawn(function()
 end)
 
 -- =========================================================================
--- AUTO HOP  --  pindah server saat semua target habis
---
--- Stok itu per-server, jadi target yang kosong di sini bisa penuh di server
--- sebelah. Ini yang membuat menunggu restock di satu server kalah cepat
--- dibanding pindah.
---
--- Tiga penjaga, semuanya karena mode gagalnya sama: bot berputar pindah
--- server tanpa pernah sempat membeli.
---   1. HOP_MINIMAL  -- data toko belum tentu sudah replikasi saat baru masuk;
---                      menilai stok terlalu dini membaca "semua nol" yang palsu.
---   2. HOP_TAHAN    -- nol harus BERTAHAN sekian detik, bukan sekejap.
---   3. tidak pindah saat ada trade jalan (barang bisa hilang di tengah jalan).
--- =========================================================================
-local TeleportService = game:GetService("TeleportService")
-
-local HOP_MINIMAL = 25      -- detik sejak script mulai
-local HOP_TAHAN = 20        -- detik semua target harus terus nol
-local HOP_JEDA_GAGAL = 15   -- jeda sebelum mencoba lagi kalau daftar server gagal
-
-local hopMulai = os.clock()
-local hopNolSejak = nil
-local hopSedang = false
-
--- Semua target yang dicentang habis?  nil = belum bisa dinilai (data kosong).
-local function semuaTargetNol()
-    local semua = bacaStok()
-    if not semua or next(semua) == nil then return nil end
-    local adaTarget = false
-    for _, toko in ipairs(TOKO) do
-        local s2 = semua[toko]
-        local stoks = s2 and s2.Stocks
-        for _, x in ipairs(Daftar[toko]) do
-            if Pilih[toko][x.nama] then
-                adaTarget = true
-                -- Toko yang datanya belum replikasi BUKAN toko yang habis.
-                -- Menganggapnya nol membuat bot pindah server justru saat
-                -- data belum sempat sampai -- dan itu terjadi tepat setelah
-                -- masuk, saat stok paling mungkin masih penuh.
-                if not stoks then return nil end
-                local st = stoks[x.nama]
-                local sisa = (type(st) == "table") and (tonumber(st.Stock) or 0)
-                    or (tonumber(st) or 0)
-                if sisa > 0 then return false end
-            end
-        end
-    end
-    -- Tanpa satu pun target tercentang, "semua habis" tidak punya arti --
-    -- jangan pindah server karena pengguna belum memilih apa pun.
-    if not adaTarget then return nil end
-    return true
-end
-
--- Daftar server publik. Diambil lewat request/http_request, BUKAN game:HttpGet:
--- HttpGet mengembalikan string tanpa status, jadi 429 (rate limit) terbaca
--- sebagai isi yang sah dan JSONDecode gagal tanpa sebab yang jelas.
-local function daftarServer()
-    -- sortOrder=Asc WAJIB, terukur 2026-08-29: server GaG1 cuma muat 4 pemain,
-    -- dan Desc mengurutkan dari yang teramai -- 100 dari 100 hasilnya 4/4 alias
-    -- penuh semua, kandidat NOL. Fitur ini akan diam tanpa pernah pindah.
-    -- Asc pada percobaan yang sama memberi 100 dari 100 kandidat (playing 1..3).
-    local url = "https://games.roblox.com/v1/games/" .. tostring(game.PlaceId)
-        .. "/servers/Public?sortOrder=Asc&limit=100"
-    local kirim = (type(request) == "function" and request)
-        or (type(http_request) == "function" and http_request)
-    local isi
-    if kirim then
-        local ok, r = pcall(kirim, { Url = url, Method = "GET" })
-        if not ok or type(r) ~= "table" then return nil, "request gagal" end
-        if tonumber(r.StatusCode) ~= 200 then
-            return nil, "HTTP " .. tostring(r.StatusCode)
-        end
-        isi = r.Body
-    else
-        local ok, r = pcall(function() return game:HttpGet(url, true) end)
-        if not ok then return nil, "HttpGet gagal" end
-        isi = r
-    end
-    local ok, data = pcall(function() return HttpService:JSONDecode(isi) end)
-    if not ok or type(data) ~= "table" or type(data.data) ~= "table" then
-        return nil, "JSON tidak terbaca"
-    end
-    local calon = {}
-    for _, sv in ipairs(data.data) do
-        if type(sv.id) == "string" and sv.id ~= game.JobId
-           and tonumber(sv.playing) and tonumber(sv.maxPlayers)
-           and sv.playing < sv.maxPlayers then
-            calon[#calon + 1] = sv.id
-        end
-    end
-    return calon
-end
-
-local function lakukanHop()
-    if hopSedang then return end
-    hopSedang = true
-
-    local calon, sebab = daftarServer()
-    if not calon or #calon == 0 then
-        warn("[GAG HOP] daftar server tidak dapat: " .. tostring(sebab or "kosong"))
-        task.wait(HOP_JEDA_GAGAL)
-        hopSedang = false
-        hopNolSejak = nil
-        return
-    end
-
-    -- Diacak, bukan diambil yang teratas: puluhan bot yang memakai script ini
-    -- akan memilih server yang SAMA kalau urutannya tetap, dan mereka saling
-    -- merebut stok yang baru saja dicari.
-    local pilih = calon[math.random(1, #calon)]
-
-    -- Script tidak ikut terbawa saat teleport; tanpa ini bot mendarat di server
-    -- baru dalam keadaan mati. URL-nya diwariskan loader (MozeframeKaitunURL).
-    local u = getgenv().MozeframeKaitunURL
-    if type(queue_on_teleport) == "function" and type(u) == "string" then
-        pcall(queue_on_teleport,
-            ("loadstring(game:HttpGet('%s?t=' .. tostring(os.time())))()"):format(u))
-    else
-        warn("[GAG HOP] queue_on_teleport/URL tidak ada - script TIDAK akan "
-            .. "menyala sendiri di server baru.")
-    end
-
-    warn("[GAG HOP] semua target habis, pindah server...")
-    local ok = pcall(function()
-        TeleportService:TeleportToPlaceInstance(game.PlaceId, pilih, LP)
-    end)
-    if not ok then
-        pcall(function() TeleportService:Teleport(game.PlaceId, LP) end)
-    end
-    task.wait(10)
-    hopSedang = false
-end
-
-task.spawn(function()
-    while true do
-        task.wait(2)
-        if Config.Hop and not hopSedang and os.clock() - hopMulai >= HOP_MINIMAL then
-            local nol = semuaTargetNol()
-            if nol == true then
-                -- Trade yang sedang jalan tidak boleh ditinggal: barangnya
-                -- bisa menggantung di sesi yang ditinggalkan.
-                local adaTrade = TradingController ~= nil
-                    and TradingController.CurrentTradeId ~= nil
-                if adaTrade then
-                    hopNolSejak = nil
-                else
-                    hopNolSejak = hopNolSejak or os.clock()
-                    if os.clock() - hopNolSejak >= HOP_TAHAN then
-                        task.spawn(lakukanHop)
-                    end
-                end
-            else
-                hopNolSejak = nil
-            end
-        end
-    end
-end)
-
--- =========================================================================
 -- PANEL
 -- =========================================================================
 local W = {
@@ -660,7 +569,7 @@ sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 sg.Parent = (gethui and gethui()) or LP:WaitForChild("PlayerGui")
 
 local bingkai = Instance.new("Frame")
-bingkai.Size = UDim2.fromOffset(290, 492)
+bingkai.Size = UDim2.fromOffset(290, 458)
 bingkai.Position = UDim2.fromScale(0.03, 0.15)
 bingkai.BackgroundColor3 = W.latar
 bingkai.BorderSizePixel = 0
@@ -714,18 +623,9 @@ bTiket.BorderSizePixel = 0
 bTiket.Parent = bingkai
 sudut(bTiket, 8)
 
-local bHop = Instance.new("TextButton")
-bHop.Size = UDim2.fromOffset(128, 28)
-bHop.Position = UDim2.fromOffset(148, 78)
-bHop.Font = Enum.Font.GothamBold
-bHop.TextSize = 12
-bHop.BorderSizePixel = 0
-bHop.Parent = bingkai
-sudut(bHop, 8)
-
 local kotakDari = Instance.new("TextBox")
-kotakDari.Size = UDim2.fromOffset(262, 26)
-kotakDari.Position = UDim2.fromOffset(14, 112)
+kotakDari.Size = UDim2.fromOffset(128, 28)
+kotakDari.Position = UDim2.fromOffset(148, 78)
 kotakDari.BackgroundColor3 = W.baris
 kotakDari.BorderSizePixel = 0
 kotakDari.Font = Enum.Font.Gotham
@@ -741,7 +641,7 @@ sudut(kotakDari, 7)
 
 local cari = Instance.new("TextBox")
 cari.Size = UDim2.fromOffset(262, 26)
-cari.Position = UDim2.fromOffset(14, 146)
+cari.Position = UDim2.fromOffset(14, 112)
 cari.BackgroundColor3 = W.baris
 cari.BorderSizePixel = 0
 cari.Font = Enum.Font.Gotham
@@ -756,7 +656,7 @@ cari.Parent = bingkai
 sudut(cari, 7)
 
 local gulir = Instance.new("ScrollingFrame")
-gulir.Position = UDim2.fromOffset(12, 180)
+gulir.Position = UDim2.fromOffset(12, 146)
 gulir.Size = UDim2.fromOffset(266, 300)
 gulir.BackgroundTransparency = 1
 gulir.BorderSizePixel = 0
@@ -781,24 +681,33 @@ bAktif.Activated:Connect(function()
 end)
 catAktif()
 
+-- Tombol ini mewakili SETELAN TERSIMPAN, bukan keadaan sesi ini.
+--
+-- Versi sebelumnya mengunci diri begitu boost dipasang (`if sudahBoost
+-- then return end`), sehingga setelan tidak pernah bisa dikembalikan ke
+-- OFF -- boost lalu menyala otomatis tiap rejoin selamanya. Yang tidak
+-- bisa dibatalkan itu sapuan yang SUDAH jalan, bukan pilihannya.
 local function catBoost()
-    if sudahBoost then
-        bBoost.Text = "FPS BOOST  \226\151\143  ON"
-        bBoost.BackgroundColor3 = W.pilih
-        bBoost.TextColor3 = W.centang
-    else
-        bBoost.Text = "FPS BOOST  \226\151\139  OFF"
-        bBoost.BackgroundColor3 = W.baris
-        bBoost.TextColor3 = W.redup
-    end
+    bBoost.Text = Config.Boost and "FPS BOOST  \226\151\143  ON"
+        or "FPS BOOST  \226\151\139  OFF"
+    bBoost.BackgroundColor3 = Config.Boost and W.pilih or W.baris
+    bBoost.TextColor3 = Config.Boost and W.centang or W.redup
 end
 
--- Sekali tekan, tidak ada jalan pulang selain rejoin -- jadi tombolnya TIDAK
--- dibuat toggle. Menampilkan "OFF" yang bisa ditekan balik itu bohong.
 bBoost.Activated:Connect(function()
-    if sudahBoost then return end
-    Config.Boost = true
+    Config.Boost = not Config.Boost
     simpanConfig()
+    catBoost()
+
+    if not Config.Boost then
+        if sudahBoost then
+            warn("[GAG FPS] setelan OFF disimpan. Sapuan yang sudah jalan "
+                .. "di sesi ini tidak bisa dibatalkan -- berlaku setelah rejoin.")
+        end
+        return
+    end
+    if sudahBoost then return end
+
     bBoost.Text = "BOOSTING..."
     task.spawn(function()
         local ok, hasil = pcall(boostFPS)
@@ -824,21 +733,6 @@ kotakDari.FocusLost:Connect(function()
     simpanConfig()
 end)
 catTiket()
-
-local function catHop()
-    bHop.Text = Config.Hop and "AUTO HOP  \226\151\143  ON" or "AUTO HOP  \226\151\139  OFF"
-    bHop.BackgroundColor3 = Config.Hop and W.pilih or W.baris
-    bHop.TextColor3 = Config.Hop and W.centang or W.redup
-end
-bHop.Activated:Connect(function()
-    Config.Hop = not Config.Hop
-    catHop()
-    simpanConfig()
-    -- Hitungan nol dimulai dari nol lagi tiap kali disalakan, supaya menekan
-    -- tombol tidak langsung memicu pindah karena sisa hitungan lama.
-    hopNolSejak = nil
-end)
-catHop()
 
 for nomor, toko in ipairs(TOKO) do
     -- Label disamarkan jadi "Shop N". Nama asli tetap dipakai memanggil remote;
@@ -1045,7 +939,7 @@ local terakhir = {}
 -- Ini BUKAN cara menembus batas stok: server tetap memvalidasi tiap tembakan
 -- dan menolak yang melebihi. Menembak stok habis aman (ditolak, tidak memakan
 -- apa pun) -- itu sebabnya melebihkan sedikit tidak berbahaya.
-local BURST_JEDA = 0.01
+local BURST_JEDA = 0.05
 local BURST_MAKS = 25
 local sedangBurst = {}
 
@@ -1057,14 +951,14 @@ local function burstBeli(toko, nama, jumlah)
     sedangBurst[kunci] = true
     task.spawn(function()
         for _ = 1, jumlah do
-            pcall(function() Remote:FireServer(nama, toko) end)
+            tembakBeli(toko, nama)
             task.wait(BURST_JEDA)
             -- Berhenti begitu stok benar-benar habis, jangan menghabiskan
             -- sisa jatah burst. Stok yang terlihat bisa BASI: kalau pemain
             -- lain memborongnya lebih dulu, meneruskan burst berarti 25
             -- penolakan beruntun -- dan penolakan beruntun itu yang pernah
             -- memicu kick di game lain, bukan pembeliannya.
-            local st = (bacaStok()[toko] or {}).Stocks
+            local st = stoksDari(bacaStok(), toko)
             st = st and st[nama]
             local sisa = (type(st) == "table") and (tonumber(st.Stock) or 0)
                 or (tonumber(st) or 0)
@@ -1081,8 +975,7 @@ local function sapuBeli()
     -- memanggil GetData ratusan kali tiap frame itu pemborosan yang terasa.
     local semua = bacaStok()
     for _, toko in ipairs(TOKO) do
-        local s = semua[toko]
-        local stoks = s and s.Stocks
+        local stoks = stoksDari(semua, toko)
         if stoks then
             for _, x in ipairs(Daftar[toko]) do
                 if Pilih[toko][x.nama] then
