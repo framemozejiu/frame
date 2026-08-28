@@ -508,3 +508,5 @@ end)
 
 print(("[GAG] panel siap. %d toko, setelan %s. Anti-AFK aktif."):format(#TOKO,
     adaSimpanan and "dimuat dari berkas" or "bawaan"))
+
+-- @MOZEFRAME-EOF@
