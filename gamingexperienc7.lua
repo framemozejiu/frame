@@ -39,6 +39,11 @@ local Config = { Aktif = (SIMPAN.Aktif ~= false), JedaItem = 0.25 }
 -- Boost SATU ARAH: butuh rejoin untuk pulih. Karena itu default MATI dan
 -- harus dinyalakan sendiri, tidak ikut menyala cuma karena panel dibuka.
 Config.Boost = (SIMPAN.Boost == true)
+-- Auto terima trade. Default MATI: menyalakannya berarti akun ini menerima
+-- ajakan trade tanpa dilihat orang.
+Config.Tiket = (SIMPAN.Tiket == true)
+-- Kosong = siapa saja. Diisi = HANYA nama itu (pisah koma) yang diterima.
+Config.TiketDari = type(SIMPAN.TiketDari) == "string" and SIMPAN.TiketDari or ""
 -- Dideklarasikan maju: dipakai handler tombol yang dibuat sebelum badannya ada.
 -- `local function` dua kali menghasilkan DUA fungsi berbeda, dan yang dipegang
 -- tombol adalah yang kosong -- setelan tidak akan pernah tersimpan.
@@ -140,6 +145,7 @@ simpanConfig = function()
     pcall(function()
         writefile(BERKAS, HttpService:JSONEncode({
             Aktif = Config.Aktif, Boost = Config.Boost, Pilih = Pilih,
+            Tiket = Config.Tiket, TiketDari = Config.TiketDari,
         }))
     end)
 end
@@ -332,6 +338,136 @@ local function boostFPS()
 end
 
 -- =========================================================================
+-- AUTO TERIMA TRADE  ("ticket")
+--
+-- Dipakai untuk mengoper barang dari akun utama ke akun bot: akun utama yang
+-- mengajak dan mengisi barang, bot cuma menerima.
+--
+-- Protokol terukur langsung dari script game (2026-08-29):
+--   SendRequest.OnClientEvent(id, Player pengirim, kadaluarsa)
+--       -> RespondRequest:FireServer(id, true)   -- menerima ajakan
+--   lalu keadaan per pemain di TradingController.CurrentTradeReplicator:
+--       Data.players = {Player, Player}
+--       Data.states  = {"None"|"Accepted"|"Confirmed"|"Processing"}
+--       Data.lastChange = waktu server perubahan terakhir
+--   Accept BUKAN toggle -- ia maju None -> Accepted, lalu Confirm -> Confirmed.
+--   Server menahan tombol selama TradeData.ButtonCooldown (terukur = 5 detik)
+--   sejak lastChange, jadi menembak lebih cepat dari itu percuma.
+--
+-- BOT TIDAK PERNAH MENARUH APA PUN. AddItem/SetSheckles/SetTokens sengaja
+-- tidak dipanggil di mana pun. Itu yang membuat auto terima ini tidak bisa
+-- dipakai orang lain untuk menguras akun bot: pihak lain tidak punya cara
+-- memindahkan barang dari sisi kita.
+-- =========================================================================
+local TradeEvents = RS.GameEvents:FindFirstChild("TradeEvents")
+local TradingController, TradeData
+pcall(function()
+    TradingController = require(RS.Modules.TradeControllers.TradingController)
+    TradeData = require(RS.Data.TradeData)
+end)
+
+local COOLDOWN = (TradeData and tonumber(TradeData.ButtonCooldown)) or 5
+-- Trade yang menggantung memblokir bot (game menolak aksi lain dengan
+-- "Finish trading first!"), jadi ada batas waktu -- bukan menunggu selamanya.
+local TIKET_BATAS = 180
+
+local tiketMulai, tiketLawan = 0, "-"
+local tiketStat = { terima = 0, tolak = 0, selesai = 0 }
+
+-- Keputusan satu langkah trade, dipisah supaya bisa diuji tanpa game.
+--   saya/lawan : "None" | "Accepted" | "Confirmed" | "Processing"
+--   umur       : detik sejak Data.lastChange menurut waktu server
+local function tiketAksi(saya, lawan, umur)
+    -- Server menolak sebelum cooldown lewat; menembak lebih awal cuma
+    -- menghabiskan remote tanpa mengubah apa pun.
+    if umur < COOLDOWN then return nil end
+    if saya == "None" then return "accept" end
+    if saya == "Accepted" and lawan ~= "None" then
+        -- Menunggu lawan keluar dari "None" itu disengaja: Confirm saat lawan
+        -- belum menerima ditolak server, dan penolakan itu me-reset lastChange
+        -- sehingga malah menambah 5 detik.
+        return "confirm"
+    end
+    if saya == "Confirmed" and lawan == "Confirmed" then return "selesai" end
+    -- "Processing" sengaja tidak ditangani: itu keadaan server sedang memproses.
+    return nil
+end
+
+local function tiketDiizinkan(pemain)
+    local saring = Config.TiketDari or ""
+    if saring:gsub("%s", "") == "" then return true end
+    local nama = string.lower(pemain.Name)
+    for potong in string.gmatch(string.lower(saring), "[^,]+") do
+        potong = potong:match("^%s*(.-)%s*$")
+        if potong ~= "" and potong == nama then return true end
+    end
+    return false
+end
+
+if TradeEvents and TradeEvents:FindFirstChild("SendRequest") then
+    TradeEvents.SendRequest.OnClientEvent:Connect(function(id, pengirim, _)
+        if not Config.Tiket then return end
+        if typeof(pengirim) ~= "Instance" then return end
+        if not tiketDiizinkan(pengirim) then
+            tiketStat.tolak = tiketStat.tolak + 1
+            pcall(function() TradeEvents.RespondRequest:FireServer(id, false) end)
+            return
+        end
+        tiketStat.terima = tiketStat.terima + 1
+        tiketLawan = pengirim.Name
+        tiketMulai = os.clock()
+        pcall(function() TradeEvents.RespondRequest:FireServer(id, true) end)
+        warn(("[GAG TIKET] terima ajakan dari %s"):format(tiketLawan))
+    end)
+end
+
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        if Config.Tiket and TradingController then
+            pcall(function()
+                local rep = TradingController.CurrentTradeReplicator
+                if not rep then
+                    tiketMulai = 0
+                    return
+                end
+                if tiketMulai == 0 then tiketMulai = os.clock() end
+
+                local Data = rep:GetData()
+                if not Data or not Data.players or not Data.states then return end
+
+                local iSaya = table.find(Data.players, LP)
+                if not iSaya then return end
+                local iLawan = (iSaya == 1) and 2 or 1
+                local saya, lawan = Data.states[iSaya], Data.states[iLawan]
+
+                if os.clock() - tiketMulai > TIKET_BATAS then
+                    TradingController:Decline()
+                    tiketMulai = 0
+                    warn(("[GAG TIKET] batal: %s menggantung lebih dari %d dtk")
+                        :format(tiketLawan, TIKET_BATAS))
+                    return
+                end
+
+                local umur = workspace:GetServerTimeNow() - (tonumber(Data.lastChange) or 0)
+                local aksi = tiketAksi(saya, lawan, umur)
+
+                if aksi == "accept" then
+                    TradingController:Accept()
+                elseif aksi == "confirm" then
+                    TradingController:Confirm()
+                elseif aksi == "selesai" then
+                    tiketStat.selesai = tiketStat.selesai + 1
+                    tiketMulai = 0
+                    warn(("[GAG TIKET] selesai dengan %s (total %d)")
+                        :format(tiketLawan, tiketStat.selesai))
+                end
+            end)
+        end
+    end
+end)
+
+-- =========================================================================
 -- PANEL
 -- =========================================================================
 local W = {
@@ -362,7 +498,7 @@ sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 sg.Parent = (gethui and gethui()) or LP:WaitForChild("PlayerGui")
 
 local bingkai = Instance.new("Frame")
-bingkai.Size = UDim2.fromOffset(290, 424)
+bingkai.Size = UDim2.fromOffset(290, 458)
 bingkai.Position = UDim2.fromScale(0.03, 0.15)
 bingkai.BackgroundColor3 = W.latar
 bingkai.BorderSizePixel = 0
@@ -407,9 +543,34 @@ bBoost.BorderSizePixel = 0
 bBoost.Parent = bingkai
 sudut(bBoost, 8)
 
+local bTiket = Instance.new("TextButton")
+bTiket.Size = UDim2.fromOffset(128, 28)
+bTiket.Position = UDim2.fromOffset(14, 78)
+bTiket.Font = Enum.Font.GothamBold
+bTiket.TextSize = 12
+bTiket.BorderSizePixel = 0
+bTiket.Parent = bingkai
+sudut(bTiket, 8)
+
+local kotakDari = Instance.new("TextBox")
+kotakDari.Size = UDim2.fromOffset(128, 28)
+kotakDari.Position = UDim2.fromOffset(148, 78)
+kotakDari.BackgroundColor3 = W.baris
+kotakDari.BorderSizePixel = 0
+kotakDari.Font = Enum.Font.Gotham
+kotakDari.TextSize = 11
+kotakDari.TextColor3 = W.terang
+kotakDari.PlaceholderText = "  from: anyone"
+kotakDari.PlaceholderColor3 = W.stokNol
+kotakDari.Text = Config.TiketDari or ""
+kotakDari.ClearTextOnFocus = false
+kotakDari.TextXAlignment = Enum.TextXAlignment.Left
+kotakDari.Parent = bingkai
+sudut(kotakDari, 7)
+
 local cari = Instance.new("TextBox")
 cari.Size = UDim2.fromOffset(262, 26)
-cari.Position = UDim2.fromOffset(14, 78)
+cari.Position = UDim2.fromOffset(14, 112)
 cari.BackgroundColor3 = W.baris
 cari.BorderSizePixel = 0
 cari.Font = Enum.Font.Gotham
@@ -424,7 +585,7 @@ cari.Parent = bingkai
 sudut(cari, 7)
 
 local gulir = Instance.new("ScrollingFrame")
-gulir.Position = UDim2.fromOffset(12, 112)
+gulir.Position = UDim2.fromOffset(12, 146)
 gulir.Size = UDim2.fromOffset(266, 300)
 gulir.BackgroundTransparency = 1
 gulir.BorderSizePixel = 0
@@ -475,6 +636,23 @@ bBoost.Activated:Connect(function()
     end)
 end)
 catBoost()
+
+local function catTiket()
+    bTiket.Text = Config.Tiket and "AUTO TICKET  \226\151\143  ON"
+        or "AUTO TICKET  \226\151\139  OFF"
+    bTiket.BackgroundColor3 = Config.Tiket and W.pilih or W.baris
+    bTiket.TextColor3 = Config.Tiket and W.centang or W.redup
+end
+bTiket.Activated:Connect(function()
+    Config.Tiket = not Config.Tiket
+    catTiket()
+    simpanConfig()
+end)
+kotakDari.FocusLost:Connect(function()
+    Config.TiketDari = kotakDari.Text
+    simpanConfig()
+end)
+catTiket()
 
 for nomor, toko in ipairs(TOKO) do
     -- Label disamarkan jadi "Shop N". Nama asli tetap dipakai memanggil remote;
@@ -670,6 +848,46 @@ end)
 -- =========================================================================
 local terakhir = {}
 
+-- Menembak SEBANYAK stok yang terlihat, bukan satu per sapuan.
+--
+-- Alasannya terukur dari script lama (kaitun_main): ia menembak tiap 0,1 dtk
+-- dan itu yang membuatnya kelihatan "beli 2-3 sekaligus" -- sebenarnya cuma
+-- hitungan inventory yang telat menyusul, tapi lajunya memang jauh di atas
+-- satu-tembakan-per-0,25-dtk. Stok langka habis dalam hitungan detik, jadi
+-- laju itu yang menentukan kebagian atau tidak.
+--
+-- Ini BUKAN cara menembus batas stok: server tetap memvalidasi tiap tembakan
+-- dan menolak yang melebihi. Menembak stok habis aman (ditolak, tidak memakan
+-- apa pun) -- itu sebabnya melebihkan sedikit tidak berbahaya.
+local BURST_JEDA = 0.05
+local BURST_MAKS = 25
+local sedangBurst = {}
+
+local function burstBeli(toko, nama, jumlah)
+    local kunci = toko .. "|" .. nama
+    -- Kunci per item: Heartbeat menyala 60x/dtk dan tanpa ini tiap frame
+    -- menumpuk satu coroutine burst baru untuk item yang sama.
+    if sedangBurst[kunci] then return end
+    sedangBurst[kunci] = true
+    task.spawn(function()
+        for _ = 1, jumlah do
+            pcall(function() Remote:FireServer(nama, toko) end)
+            task.wait(BURST_JEDA)
+            -- Berhenti begitu stok benar-benar habis, jangan menghabiskan
+            -- sisa jatah burst. Stok yang terlihat bisa BASI: kalau pemain
+            -- lain memborongnya lebih dulu, meneruskan burst berarti 25
+            -- penolakan beruntun -- dan penolakan beruntun itu yang pernah
+            -- memicu kick di game lain, bukan pembeliannya.
+            local st = (bacaStok()[toko] or {}).Stocks
+            st = st and st[nama]
+            local sisa = (type(st) == "table") and (tonumber(st.Stock) or 0)
+                or (tonumber(st) or 0)
+            if sisa <= 0 then break end
+        end
+        sedangBurst[kunci] = nil
+    end)
+end
+
 local function sapuBeli()
     if not Config.Aktif then return end
     local kini = os.clock()
@@ -699,7 +917,7 @@ local function sapuBeli()
                     if sisa > 0 and mampu
                        and (kini - (terakhir[kunci] or 0)) >= Config.JedaItem then
                         terakhir[kunci] = kini
-                        pcall(function() Remote:FireServer(x.nama, toko) end)
+                        burstBeli(toko, x.nama, math.min(sisa, BURST_MAKS))
                     end
                 end
             end
