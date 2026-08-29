@@ -55,6 +55,25 @@ if string.find(raw_panel_key, "/") then
     panel_key = string.split(raw_panel_key, "/")[1]
 end
 
+-- ==== CONFIG GENERATOR MENANG ATAS PANEL ====
+--
+-- Aturan yang sama seperti di kaitun utama: tabel berisi lebih dari sekadar
+-- PanelKey pasti datang dari Config Generator, dan setelannya harus dipakai
+-- apa adanya. Sebelumnya terapkanConfig() menimpanya tiap 30 detik, dan sync
+-- pertama menyala cuma 0-20 detik sesudah start -- setelan generator praktis
+-- tidak pernah bertahan sampai satu siklus kebun selesai.
+--
+-- Dipakai lewat _G, bukan local baru: chunk utama berkas ini sudah dekat batas
+-- 200 local per fungsi milik Luau, dan tambahan di scope file paling mahal di
+-- sini.
+_G.MozeConfigLokal = false
+for k in pairs(cfgFH) do
+    if k ~= "PanelKey" then
+        _G.MozeConfigLokal = true
+        break
+    end
+end
+
 -- URL server Railway (pengganti Firebase)
 local SERVER_URL = "https://mozeframe.my.id"
 
@@ -4082,19 +4101,50 @@ local TeleportService = game:GetService("TeleportService")
 -- mendarat sesudah rejoin dalam keadaan MATI tanpa satu pun pesan.
 local URL_LOADER = "https://loader.luaegis.net/scripts/v4/loaders/9ea5c8fe-2cd5-42d3-a929-5b626f3890c0.lua"
 
--- BELUM SELESAI: begitu sync config dicabut, titipan di bawah harus membawa
--- SELURUH Config, bukan cuma PanelKey. Sekarang ia cuma menitipkan key karena
--- sisanya diisi ulang oleh sync sesudah mendarat. Tanpa sync, bot yang baru
--- teleport akan berjalan tanpa satu pun setelan.
+-- SELESAI (dulu bertanda BELUM): titipan di bawah kini membawa SELURUH setelan.
+--
+-- Wajib sejak config generator diprioritaskan -- sync tidak lagi mengisi ulang
+-- Config sesudah mendarat, jadi titipan inilah satu-satunya pembawa setelan
+-- melewati teleport. Kalau ia cuma membawa PanelKey, bot yang rejoin atau
+-- kembali ke World 1 mendarat polos.
+--
+-- cfgFH dan cfgMain aman diserahkan langsung: keduanya tidak pernah diubah saat
+-- runtime (Config di berkas ini tabel BARU, bukan tabel getgenv yang sama seperti
+-- di kaitun utama), jadi tidak perlu salinan beku.
+local function tulisLua(v)
+    local t = type(v)
+    if t == "string" then return string.format("%q", v) end
+    if t == "number" or t == "boolean" then return tostring(v) end
+    if t ~= "table" then return "nil" end
+    local bagian = {}
+    for kk, vv in pairs(v) do
+        local kunci
+        if type(kk) == "string" then
+            kunci = "[" .. string.format("%q", kk) .. "]="
+        elseif type(kk) == "number" then
+            kunci = "[" .. tostring(kk) .. "]="
+        end
+        if kunci then
+            bagian[#bagian + 1] = kunci .. tulisLua(vv)
+        end
+    end
+    return "{" .. table.concat(bagian, ",") .. "}"
+end
 
 local function kodeLanjutan()
     -- Kedua nama config diisi karena tujuannya bisa GaG2 maupun Fall Harvest,
-    -- dan masing-masing script membaca nama yang berbeda.
+    -- dan masing-masing script membaca nama yang berbeda. Setelan World 1
+    -- diteruskan apa adanya -- berkas ini tidak pernah memegangnya.
+    local w1, w2 = {}, {}
+    for k, v in pairs(cfgMain) do w1[k] = v end
+    for k, v in pairs(cfgFH) do w2[k] = v end
+    w1.PanelKey = raw_panel_key
+    w2.PanelKey = raw_panel_key
     return string.format(
-        "getgenv().MuzeAutoBuyConfig = { PanelKey = %q }\n" ..
-        "getgenv().MuzeFallHarvestConfig = { PanelKey = %q }\n" ..
+        "getgenv().MuzeAutoBuyConfig = %s\n" ..
+        "getgenv().MuzeFallHarvestConfig = %s\n" ..
         "loadstring(game:HttpGet(%q))()",
-        raw_panel_key, raw_panel_key, URL_LOADER)
+        tulisLua(w1), tulisLua(w2), URL_LOADER)
 end
 
 -- Nama fungsi antrian berbeda-beda antar executor, dan sebagian executor HP
@@ -4857,7 +4907,14 @@ local function syncKePanel()
         return game:GetService("HttpService"):JSONDecode(res.Body)
     end)
     if okJ and balasan and balasan.status == "success" and type(balasan.config) == "table" then
-        local berubah = terapkanConfig(balasan.config)
+        -- Config generator menang: payload panel tidak diterapkan sama sekali.
+        -- QuickAction TIDAK ikut terhalang -- ia dibaca langsung dari
+        -- balasan.config di bawah, bukan lewat terapkanConfig(), jadi tombol
+        -- panel tetap hidup.
+        local berubah = 0
+        if not _G.MozeConfigLokal then
+            berubah = terapkanConfig(balasan.config)
+        end
         if berubah > 0 then
             status(string.format("[CONFIG] %d setelan diperbarui dari panel", berubah))
         end
@@ -4882,10 +4939,18 @@ local function syncKePanel()
         for _, k in ipairs(kunciW2) do
             if balasan.config[k] ~= nil then adaW2 = adaW2 + 1 end
         end
-        _G.KaitunSyncDebug = string.format("[OK] %s | %d kunci, %d/%d setelan W2%s",
-            os.date("%H:%M:%S"), total, adaW2, #kunciW2,
-            adaW2 == 0 and "  <-- TIDAK ADA setelan W2, Terapkan dari form Fall Harvest"
-            or "")
+        -- Saat config lokal dipakai, peringatan "Terapkan dari form Fall Harvest"
+        -- justru menyesatkan: payload panel memang sengaja tidak dipakai, jadi
+        -- kosongnya setelan W2 di sana bukan lagi kekeliruan yang perlu dikejar.
+        if _G.MozeConfigLokal then
+            _G.KaitunSyncDebug = string.format("[OK] %s | %d kunci panel DIABAIKAN (config generator)",
+                os.date("%H:%M:%S"), total)
+        else
+            _G.KaitunSyncDebug = string.format("[OK] %s | %d kunci, %d/%d setelan W2%s",
+                os.date("%H:%M:%S"), total, adaW2, #kunciW2,
+                adaW2 == 0 and "  <-- TIDAK ADA setelan W2, Terapkan dari form Fall Harvest"
+                or "")
+        end
 
         local act = balasan.config.QuickAction
         if act then
