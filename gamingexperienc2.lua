@@ -8,6 +8,45 @@ if string.find(raw_panel_key, "/") then
     panel_key = string.split(raw_panel_key, "/")[1]
 end
 
+-- ==== CONFIG GENERATOR MENANG ATAS PANEL ====
+--
+-- Tabel yang berisi LEBIH dari sekadar PanelKey pasti datang dari Config
+-- Generator: loader biasa hanya menitipkan key. Kalau itu yang terjadi, setelan
+-- di dalamnya harus dipakai apa adanya.
+--
+-- Kenapa ini perlu: dulu syncConfig() menyalin SELURUH config panel ke Config
+-- (Config[k] = v), dan thread sync-nya menyala 0-30 detik sesudah start lalu
+-- mengulang tiap 30 detik. Jadi setelan generator memang sempat berlaku, tapi
+-- terhapus kurang dari setengah menit kemudian tanpa satu pun pesan -- dan akun
+-- yang belum pernah disentuh panel malah mendapat DEFAULT SERVER, karena
+-- hwid_bot.py membuatkan baris config baru saat sync pertama.
+--
+-- Sync sendiri TIDAK dimatikan: status, HWID, Live Monitor dan QuickAction
+-- semuanya lewat jalur yang sama. Yang berhenti hanya penimpaan setelan.
+_G.MozeConfigLokal = false
+for k in pairs(config) do
+    if k ~= "PanelKey" then
+        _G.MozeConfigLokal = true
+        break
+    end
+end
+
+-- Salinan BEKU untuk titipan teleport.
+--
+-- `Config` di bawah adalah tabel getgenv() YANG SAMA dengan `config` di atas,
+-- dan ia berubah saat runtime (QuickAction dihapus, AutoKeWorld2 dipaksa
+-- false). Menyerahkannya langsung ke queue_on_teleport berarti menitipkan
+-- keadaan runtime, bukan setelan asli buyer.
+local function salinDalam(t)
+    local hasil = {}
+    for k, v in pairs(t) do
+        hasil[k] = (type(v) == "table") and salinDalam(v) or v
+    end
+    return hasil
+end
+local CONFIG_ASLI_W1 = salinDalam(config)
+local CONFIG_ASLI_W2 = salinDalam(getgenv().MuzeFallHarvestConfig or {})
+
 -- URL server Railway (pengganti Firebase)
 local SERVER_URL = "https://mozeframe.my.id"
 
@@ -668,19 +707,53 @@ local TeleportService = game:GetService("TeleportService")
 -- mendarat sesudah rejoin dalam keadaan MATI tanpa satu pun pesan.
 local URL_LOADER = "https://loader.luaegis.net/scripts/v4/loaders/9ea5c8fe-2cd5-42d3-a929-5b626f3890c0.lua"
 
--- BELUM SELESAI: begitu sync config dicabut, titipan di bawah harus membawa
--- SELURUH Config, bukan cuma PanelKey. Sekarang ia cuma menitipkan key karena
--- sisanya diisi ulang oleh sync sesudah mendarat. Tanpa sync, bot yang baru
--- teleport akan berjalan tanpa satu pun setelan.
+-- SELESAI (dulu bertanda BELUM): titipan di bawah kini membawa SELURUH setelan,
+-- bukan cuma PanelKey.
+--
+-- Ini WAJIB begitu config generator diprioritaskan. Sebelumnya titipan cukup
+-- membawa key karena sisanya diisi ulang oleh sync sesudah mendarat; sekarang
+-- sync tidak lagi menimpa, jadi titipan inilah SATU-SATUNYA pembawa setelan
+-- melewati teleport. Kalau ia tetap cuma membawa PanelKey, bot yang pindah
+-- dunia atau rejoin akan mendarat polos tanpa satu pun setelan.
+
+-- Menyusun literal Lua dari tabel setelan. Kunci ditulis dalam bentuk ["nama"]
+-- supaya nama dengan spasi ("Baby Cactus") maupun angka tetap sah.
+local function tulisLua(v)
+    local t = type(v)
+    if t == "string" then return string.format("%q", v) end
+    if t == "number" or t == "boolean" then return tostring(v) end
+    if t ~= "table" then return "nil" end
+    local bagian = {}
+    for kk, vv in pairs(v) do
+        local kunci
+        if type(kk) == "string" then
+            kunci = "[" .. string.format("%q", kk) .. "]="
+        elseif type(kk) == "number" then
+            kunci = "[" .. tostring(kk) .. "]="
+        end
+        -- Kunci bertipe lain (boolean/tabel) dibuang: tidak pernah ada di config
+        -- mana pun, dan menuliskannya menghasilkan Lua yang tidak sah.
+        if kunci then
+            bagian[#bagian + 1] = kunci .. tulisLua(vv)
+        end
+    end
+    return "{" .. table.concat(bagian, ",") .. "}"
+end
 
 local function kodeLanjutan()
     -- Kedua nama config diisi karena tujuannya bisa GaG2 maupun Fall Harvest,
-    -- dan masing-masing script membaca nama yang berbeda.
+    -- dan masing-masing script membaca nama yang berbeda. Setelan W2 diteruskan
+    -- APA ADANYA dari titipan asli -- script W1 tidak pernah memegang config
+    -- World 2, jadi ia hanya boleh meneruskan, bukan menyusun ulang.
+    local w1 = salinDalam(CONFIG_ASLI_W1)
+    local w2 = salinDalam(CONFIG_ASLI_W2)
+    w1.PanelKey = raw_panel_key
+    w2.PanelKey = raw_panel_key
     return string.format(
-        "getgenv().MuzeAutoBuyConfig = { PanelKey = %q }\n" ..
-        "getgenv().MuzeFallHarvestConfig = { PanelKey = %q }\n" ..
+        "getgenv().MuzeAutoBuyConfig = %s\n" ..
+        "getgenv().MuzeFallHarvestConfig = %s\n" ..
         "loadstring(game:HttpGet(%q))()",
-        raw_panel_key, raw_panel_key, URL_LOADER)
+        tulisLua(w1), tulisLua(w2), URL_LOADER)
 end
 
 -- Nama fungsi antrian berbeda-beda antar executor, dan sebagian executor HP
@@ -994,8 +1067,17 @@ local function syncConfig()
         if response and response.StatusCode == 200 then
             local resData = HttpService:JSONDecode(response.Body)
             if resData.status == "success" and resData.config then
+                -- QuickAction DIKECUALIKAN dari gerbang config lokal.
+                --
+                -- Ia bukan setelan melainkan perintah sekali pakai (tombol
+                -- SellAll / Daily Deal / JOIN di panel), dan handler di bawah
+                -- membacanya dari Config.QuickAction. Kalau ikut diblokir,
+                -- tombol-tombol panel mati diam-diam untuk semua akun yang
+                -- memakai config generator.
                 for k, v in pairs(resData.config) do
-                    Config[k] = v
+                    if k == "QuickAction" or not _G.MozeConfigLokal then
+                        Config[k] = v
+                    end
                 end
 
                 -- ==== BERSIHKAN KEY USANG ====
@@ -1010,6 +1092,11 @@ local function syncConfig()
                 -- tapi script ini membaca "BuySeeds" (boolean) dan "Seeds"
                 -- (dictionary {nama: true}). Tanpa mapping ini, seed tidak
                 -- pernah dibeli meski panel sudah di-set — terukur 2026-08-08.
+                --
+                -- Ikut dilewati saat config lokal dipakai: seluruh blok ini
+                -- menulis ke Config dari payload panel, jadi tanpa gerbang ini
+                -- setelan generator tetap tertimpa lewat pintu belakang.
+                if not _G.MozeConfigLokal then
                 if resData.config.AutoBeli ~= nil then
                     Config.BuySeeds = resData.config.AutoBeli
                 end
@@ -1034,10 +1121,16 @@ local function syncConfig()
                         Config.Gears[nama] = true
                     end
                 end
-                
+                end -- tutup gerbang _G.MozeConfigLokal
+
                 -- [DEBUG VISUAL UNTUK USER]
                 print("========================================")
-                print("[WEB-SYNC] Config terbaru diterima dari panel!")
+                -- Kalimatnya dibedakan supaya log tidak berbohong: saat config
+                -- lokal dipakai, yang dicetak di bawah adalah setelan GENERATOR
+                -- yang bertahan, bukan yang baru datang dari panel.
+                print(_G.MozeConfigLokal
+                    and "[WEB-SYNC] Config generator DIPAKAI — payload panel diabaikan"
+                    or  "[WEB-SYNC] Config terbaru diterima dari panel!")
                 print("-> Auto Buy Seeds: " .. tostring(Config.BuySeeds))
                 local s_str = ""
                 local s_count = 0
@@ -2496,7 +2589,13 @@ local function startAutoBuy()
                     warn("[AUTOBUY] ⚠ BuySeeds=true tapi Seeds kosong! Config mungkin belum sync dari panel.")
                     warn("[AUTOBUY] Cek console untuk [WEB-SYNC] — kalau tidak muncul, pastikan PanelKey benar.")
                 end
-                _G.AutoBuyDebug = "[WAIT] Seeds kosong — tunggu config dari panel..."
+                -- Saat config lokal dipakai, tidak ada apa pun yang sedang
+                -- ditunggu: sync tidak akan pernah mengisi Seeds. Menyuruh
+                -- buyer menunggu di keadaan itu membuat mereka diam berjam-jam
+                -- padahal yang salah ada di generator-nya.
+                _G.AutoBuyDebug = _G.MozeConfigLokal
+                    and "[SALAH SETEL] Beli seed nyala tapi daftar seed KOSONG di generator"
+                    or  "[WAIT] Seeds kosong — tunggu config dari panel..."
             else
                 _G._autoBuyWarned = false
             end
