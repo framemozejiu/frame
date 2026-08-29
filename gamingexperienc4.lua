@@ -10,6 +10,47 @@ _G.PS99Build = "2026-08-23a | mode Lucky Block Breakout"
 print("[PS99] " .. _G.PS99Build)
 
 -- ==========================================
+-- TITIPAN SESUDAH TELEPORT (Luaegis)
+--
+-- Script ini TIDAK ikut terbawa saat pemain berpindah tempat, dan PS99 memang
+-- berpindah: Teleports_RequestTeleport untuk zona, dan InstancingCmds.Enter
+-- untuk masuk instance Lucky Block Breakout. Tanpa titipan ini bot mendarat
+-- dalam keadaan MATI, tanpa pesan apa pun.
+--
+-- Yang dititipkan LOADER, bukan script ini: routernya yang memilih script
+-- sesuai PlaceId tujuan, jadi satu titipan benar untuk dunia mana pun.
+--
+-- WAJIB subdomain "loader." -- terukur 2026-08-29:
+--   https://luaegis.net/...        -> HTTP 301, isi 86 byte berupa TEKS URL
+--   https://loader.luaegis.net/... -> HTTP 200, 9.055 byte Lua sungguhan
+-- game:HttpGet tidak selalu mengikuti redirect; tanpa subdomain ini loadstring
+-- menerima teks dan gagal diam-diam.
+-- ==========================================
+do
+    local URL_LOADER =
+        "https://loader.luaegis.net/scripts/v4/loaders/9ea5c8fe-2cd5-42d3-a929-5b626f3890c0.lua"
+
+    -- Nama fungsi antrian berbeda antar executor, dan sebagian executor HP
+    -- tidak menyediakannya sama sekali -- yang begitu harus memakai autoexec.
+    local f = (syn and syn.queue_on_teleport)
+        or (fluxus and fluxus.queue_on_teleport)
+        or queue_on_teleport
+        or queueonteleport
+        or (getgenv and getgenv().queue_on_teleport)
+
+    if type(f) == "function" then
+        local ok = pcall(f, ("loadstring(game:HttpGet(%q))()"):format(URL_LOADER))
+        if not ok then
+            warn("[PS99] queue_on_teleport ditolak executor - script tidak akan "
+                .. "menyala sendiri sesudah pindah tempat.")
+        end
+    else
+        warn("[PS99] executor tanpa queue_on_teleport - pakai autoexec kalau "
+            .. "ingin script menyala lagi sesudah pindah tempat.")
+    end
+end
+
+-- ==========================================
 -- SERVICES & REFERENCES
 -- ==========================================
 local Players = game:GetService("Players")
