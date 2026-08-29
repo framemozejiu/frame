@@ -42,6 +42,10 @@ Config.Boost = (SIMPAN.Boost == true)
 -- Auto terima trade. Default MATI: menyalakannya berarti akun ini menerima
 -- ajakan trade tanpa dilihat orang.
 Config.Tiket = (SIMPAN.Tiket == true)
+-- 0 = tidak dibatasi. Cap rendah menurunkan panas & baterai di emulator,
+-- dan TIDAK menyentuh laju beli: pembelian dipicu sinyal restock dan
+-- burst ber-task.wait, bukan per frame.
+Config.FpsCap = tonumber(SIMPAN.FpsCap) or 0
 -- Kosong = siapa saja. Diisi = HANYA nama itu (pisah koma) yang diterima.
 Config.TiketDari = type(SIMPAN.TiketDari) == "string" and SIMPAN.TiketDari or ""
 -- Dideklarasikan maju: dipakai handler tombol yang dibuat sebelum badannya ada.
@@ -217,6 +221,7 @@ simpanConfig = function()
         writefile(BERKAS, HttpService:JSONEncode({
             Aktif = Config.Aktif, Boost = Config.Boost, Pilih = Pilih,
             Tiket = Config.Tiket, TiketDari = Config.TiketDari,
+            FpsCap = Config.FpsCap,
         }))
     end)
 end
@@ -232,6 +237,16 @@ end
 -- dari DataService, beli lewat remote), jadi ia tetap jalan walau seluruh
 -- hiasan toko dibuang.
 -- =========================================================================
+-- Satu-satunya tempat setfpscap dipanggil. Sebelumnya boost memanggil
+-- setfpscap(0) langsung, yang berarti menyalakan boost akan MENGHAPUS cap
+-- yang baru saja dipilih pengguna tanpa pemberitahuan.
+local function terapkanCap()
+    if type(setfpscap) ~= "function" then return false end
+    local n = tonumber(Config.FpsCap) or 0
+    local ok = pcall(setfpscap, n)
+    return ok
+end
+
 local sudahBoost = false
 
 local function boostFPS()
@@ -259,7 +274,7 @@ local function boostFPS()
 
     local n = { folder = 0, part = 0, efek = 0, texture = 0, rata = 0, anim = 0 }
 
-    if type(setfpscap) == "function" then setfpscap(0) end
+    terapkanCap()
     pcall(function()
         Lighting.GlobalShadows = false
         Lighting.Technology = Enum.Technology.Compatibility
@@ -569,7 +584,7 @@ sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 sg.Parent = (gethui and gethui()) or LP:WaitForChild("PlayerGui")
 
 local bingkai = Instance.new("Frame")
-bingkai.Size = UDim2.fromOffset(290, 458)
+bingkai.Size = UDim2.fromOffset(290, 492)
 bingkai.Position = UDim2.fromScale(0.03, 0.15)
 bingkai.BackgroundColor3 = W.latar
 bingkai.BorderSizePixel = 0
@@ -639,9 +654,18 @@ kotakDari.TextXAlignment = Enum.TextXAlignment.Left
 kotakDari.Parent = bingkai
 sudut(kotakDari, 7)
 
+local bCap = Instance.new("TextButton")
+bCap.Size = UDim2.fromOffset(262, 28)
+bCap.Position = UDim2.fromOffset(14, 112)
+bCap.Font = Enum.Font.GothamBold
+bCap.TextSize = 12
+bCap.BorderSizePixel = 0
+bCap.Parent = bingkai
+sudut(bCap, 8)
+
 local cari = Instance.new("TextBox")
 cari.Size = UDim2.fromOffset(262, 26)
-cari.Position = UDim2.fromOffset(14, 112)
+cari.Position = UDim2.fromOffset(14, 146)
 cari.BackgroundColor3 = W.baris
 cari.BorderSizePixel = 0
 cari.Font = Enum.Font.Gotham
@@ -656,7 +680,7 @@ cari.Parent = bingkai
 sudut(cari, 7)
 
 local gulir = Instance.new("ScrollingFrame")
-gulir.Position = UDim2.fromOffset(12, 146)
+gulir.Position = UDim2.fromOffset(12, 180)
 gulir.Size = UDim2.fromOffset(266, 300)
 gulir.BackgroundTransparency = 1
 gulir.BorderSizePixel = 0
@@ -733,6 +757,40 @@ kotakDari.FocusLost:Connect(function()
     simpanConfig()
 end)
 catTiket()
+
+-- Urutan sengaja naik lalu kembali ke 0, supaya satu tombol cukup dan tidak
+-- ada keadaan "cap aneh" yang tidak bisa dikeluarkan.
+local URUT_CAP = { 0, 15, 30, 60, 120 }
+
+local function catCap()
+    local n = tonumber(Config.FpsCap) or 0
+    if n <= 0 then
+        bCap.Text = "FPS CAP  \226\151\139  UNLIMITED"
+        bCap.BackgroundColor3 = W.baris
+        bCap.TextColor3 = W.redup
+    else
+        bCap.Text = ("FPS CAP  \226\151\143  %d"):format(n)
+        bCap.BackgroundColor3 = W.pilih
+        bCap.TextColor3 = W.centang
+    end
+end
+
+bCap.Activated:Connect(function()
+    local n = tonumber(Config.FpsCap) or 0
+    local i = 1
+    for k, v in ipairs(URUT_CAP) do
+        if v == n then i = k break end
+    end
+    Config.FpsCap = URUT_CAP[(i % #URUT_CAP) + 1]
+    local ok = terapkanCap()
+    catCap()
+    simpanConfig()
+    if not ok then
+        warn("[GAG FPS] executor tidak menyediakan setfpscap - cap tidak berlaku.")
+    end
+end)
+catCap()
+terapkanCap()
 
 for nomor, toko in ipairs(TOKO) do
     -- Label disamarkan jadi "Shop N". Nama asli tetap dipakai memanggil remote;
