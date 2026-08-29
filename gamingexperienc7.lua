@@ -999,29 +999,71 @@ local terakhir = {}
 -- apa pun) -- itu sebabnya melebihkan sedikit tidak berbahaya.
 local BURST_JEDA = 0.05
 local BURST_MAKS = 25
+-- Berhenti setelah sekian tembakan BERTURUT-TURUT yang tidak menghasilkan apa
+-- pun. Angka 3 diambil dari kaitun_main (W1) yang sudah lama dipakai.
+local BURST_GAGAL_MAKS = 3
+-- Slack di atas stok yang terlihat: kalau angka stoknya kurang atau restock
+-- menyelip di tengah, pembelian tidak berhenti terlalu dini.
+local BURST_SLACK = 5
+local BURST_PUTARAN_MAKS = 60
 local sedangBurst = {}
 
+-- Gaya W1: JANGAN percaya angka stok, percaya hasilnya.
+--
+-- Versi sebelumnya menembak tepat sebanyak stok yang terbaca lalu berhenti.
+-- Itu rapuh, dan sudah terbukti gagal: uji di toko benih menembak 25x ke item
+-- yang angkanya 25 di satu tabel padahal tabel yang HIDUP tidak menjualnya
+-- sama sekali -- hasilnya nol, dan tidak ada satu pun tanda kalau tidak
+-- dihitung ulang.
+--
+-- Sekarang pembelian berjalan sampai TIGA tembakan beruntun tidak menghasilkan
+-- apa-apa. Ukuran "menghasilkan" berbeda per toko:
+--   * Bee Egg Shop  -- InvokeServer membalas boolean, itu jawaban langsung.
+--   * Event shop    -- FireServer diam, jadi dinilai dari stok yang TURUN.
+--
+-- Tetap dibatasi (BURST_PUTARAN_MAKS, dan berhenti di 3 kegagalan) supaya
+-- penolakan tidak beruntun panjang -- itu yang pernah memicu kick di game lain,
+-- bukan pembeliannya.
 local function burstBeli(toko, nama, jumlah)
     local kunci = toko .. "|" .. nama
     -- Kunci per item: Heartbeat menyala 60x/dtk dan tanpa ini tiap frame
     -- menumpuk satu coroutine burst baru untuk item yang sama.
     if sedangBurst[kunci] then return end
     sedangBurst[kunci] = true
+
     task.spawn(function()
-        for _ = 1, jumlah do
-            tembakBeli(toko, nama)
-            task.wait(BURST_JEDA)
-            -- Berhenti begitu stok benar-benar habis, jangan menghabiskan
-            -- sisa jatah burst. Stok yang terlihat bisa BASI: kalau pemain
-            -- lain memborongnya lebih dulu, meneruskan burst berarti 25
-            -- penolakan beruntun -- dan penolakan beruntun itu yang pernah
-            -- memicu kick di game lain, bukan pembeliannya.
+        local function sisaStok()
             local st = stoksDari(bacaStok(), toko)
             st = st and st[nama]
-            local sisa = (type(st) == "table") and (tonumber(st.Stock) or 0)
-                or (tonumber(st) or 0)
-            if sisa <= 0 then break end
+            return (type(st) == "table") and (tonumber(st.Stock) or 0) or (tonumber(st) or 0)
         end
+
+        local batas = math.min(math.max(tonumber(jumlah) or 1, 1) + BURST_SLACK,
+            BURST_PUTARAN_MAKS)
+        local sebelumnya = sisaStok()
+        local gagal = 0
+
+        for _ = 1, batas do
+            local jawab = tembakBeli(toko, nama)
+            task.wait(BURST_JEDA)
+
+            local sisa = sisaStok()
+            local berhasil
+            if toko == BEE then
+                berhasil = (jawab == true)
+            else
+                berhasil = (sisa < sebelumnya)
+            end
+            sebelumnya = sisa
+
+            if berhasil then
+                gagal = 0
+            else
+                gagal = gagal + 1
+                if gagal >= BURST_GAGAL_MAKS then break end
+            end
+        end
+
         sedangBurst[kunci] = nil
     end)
 end
