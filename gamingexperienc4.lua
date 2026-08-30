@@ -232,6 +232,22 @@ local DefaultConfig = {
     luckyJagaAuto  = true,   -- jaga Auto Rebirth / Auto Buy Slots tetap nyala
     luckyAutoUpgrade = true, -- belanja Breakout Upgrades selama coin cukup
 
+    -- Fokus belanja upgrade. Dihabiskan sampai mentok sebelum sisanya disentuh.
+    -- Pet Slots + Pet Speed sesuai permintaan; ganti isinya untuk fokus lain.
+    luckyFokus = { "LuckyBreakoutBoardSlots", "LuckyBreakoutBallSpeed" },
+
+    -- SENGAJA BELUM ADA: luckyAutoChest dan luckyBoostMachine.
+    --
+    -- Keduanya sudah setengah terpetakan tapi BELUM bisa dipanggil dengan aman:
+    --   * Peti berkunci -> remote-nya ketemu (LuckyTitanicKey_Unlock,
+    --     LuckyGargantuanKey_Unlock) tapi tanda tangannya belum terbaca, dan
+    --     jumlah kunci tidak muncul di CurrencyCmds maupun Inventory.
+    --   * Mesin boost -> LuckyBreakoutChanceMachineCmds.AddBoost ada, tapi
+    --     argumennya belum terukur. GetCoinsToMax = 83.000.000 BreakoutCoins.
+    -- Keduanya AKSI SATU ARAH (menghabiskan kunci / coin), jadi tidak ditembak
+    -- dengan tebakan. Saklar yang tidak berefek justru kelas keluhan paling
+    -- membingungkan, jadi kuncinya tidak dipasang sampai protokolnya terukur.
+
     -- Sisa event Fiesta Maze. Eventnya SUDAH BERAKHIR, jadi semuanya dipaksa
     -- mati; kodenya masih ada dan akan dibuang di pass pembersihan terpisah.
     autoEternalMaze = false,
@@ -6275,41 +6291,153 @@ local LUCKY_PRIORITAS = (function()
     return urut
 end)()
 
-task.spawn(function()
-    pcall(function() if setthreadidentity then setthreadidentity(2) end end)
-    while generasiIni() do
-        task.wait(15)
+-- ==========================================
+-- MESIN UPGRADE BREAKOUT V2 -- INSTAN, SADAR-MAX
+--
+-- Ditulis ulang 2026-08-30 sesudah event berganti ke V2 (PlaceVersion 468).
+-- Yang berubah dari versi lama, semuanya TERUKUR di akun hidup:
+--
+--   * Upgrade bertambah dari 9 jadi 12. Dua yang baru -- BlasterRate dan
+--     BlasterDamage -- ikut terbawa sendiri lewat penyapuan Directory di atas.
+--   * Batas tier BUKAN misteri lagi. Versi lama menulis "tidak ada API sudah-max
+--     yang terekspos" lalu menembak Purchase membabi buta; ternyata
+--     `#Directory.EventUpgrades[id].TierCosts` ITULAH batasnya, dan tier
+--     sekarang ada di `Save.Get().EventUpgrades[id]`. Jadi yang sudah mentok
+--     tidak ditembak lagi sama sekali.
+--   * Biaya tier berikutnya terbaca: TierCosts[tier+1]._data._am, mata uang
+--     _data.id = "BreakoutBucks". CATATAN: `_data`, BUKAN `data` -- salah satu
+--     garis bawah dan seluruh angkanya jadi 0 tanpa error.
+--
+-- Batas tier terukur: BoardSlots 100 (total 37.147 Bucks), BallSpeed/BallPower/
+-- BlockLuck/BuxBonus/GiftDrops 10 (4.002), BlasterRate 10 (19.569),
+-- BlasterDamage 10 (21.377), TitanicChestLuck 10 (20.045), GargantuanChestLuck
+-- 10 (47.835), EggTier 9 (472.440), BumperSlots 4 (347.000).
+--
+-- KENAPA TIDAK MEMAKAI AUTO BUY BAWAAN GAME: ada (AUTO_BUY_TRACKS,
+-- AutoBuyAll/AutoBuyOrder di save), tapi urutannya milik game dan tidak bisa
+-- difokuskan. Kita mau Pet Slots + Pet Speed lebih dulu, jadi belanja sendiri.
 
-        if Config.luckyAutoUpgrade then
-            pcall(function()
-                local EU = require(Client:WaitForChild("EventUpgradeCmds"))
-                local terbeli, tierBaru
+-- Fokus belanja. Yang di sini dihabiskan LEBIH DULU sampai mentok, baru sisanya
+-- menyusul urutan LUCKY_PRIORITAS. Pet Slots dulu karena tier 1-nya cuma 3
+-- Bucks dan tiap slot menambah pet di papan; Pet Speed sesudahnya.
+local LUCKY_FOKUS = { "LuckyBreakoutBoardSlots", "LuckyBreakoutBallSpeed" }
 
-                for _, nama in ipairs(LUCKY_PRIORITAS) do
-                    -- Tidak ada API "sudah max" yang terekspos, jadi tidak ada
-                    -- yang bisa ditanyakan lebih dulu: Purchase sendiri yang
-                    -- menolak, entah karena max entah karena coin kurang.
-                    -- Keduanya aman -- yang ditolak tidak memakan apa pun.
-                    local ok, berhasil = pcall(EU.Purchase, nama)
-                    if ok and berhasil == true then
-                        terbeli = nama
-                        -- Dijeda sebentar sebelum membaca tier: dibaca seketika
-                        -- sesudah Purchase, nilainya masih yang LAMA (terukur
-                        -- melaporkan "tier 0" padahal sudah jadi 1), dan status
-                        -- yang salah lebih buruk daripada status yang telat.
-                        task.wait(0.3)
-                        tierBaru = select(2, pcall(EU.GetTier, nama))
-                        break -- satu pembelian per siklus
+-- Batas tier + biaya tier berikutnya, dibaca dari Directory.
+local function luckyInfo(id)
+    local ok, maks, biaya, mata = pcall(function()
+        local d = require(ReplicatedStorage.Library.Directory.EventUpgrades)[id]
+        if not (d and d.TierCosts) then return nil end
+        local tier = require(Client:WaitForChild("EventUpgradeCmds")).GetTier(id)
+        local berikut = d.TierCosts[tier + 1]
+        return #d.TierCosts,
+               berikut and tonumber(berikut._data and berikut._data._am) or nil,
+               berikut and berikut._data and berikut._data.id or "BreakoutBucks",
+               tier
+    end)
+    if not ok then return nil end
+    return maks, biaya, mata
+end
+
+-- Satu putaran belanja: terus beli selama masih ada yang mampu dibayar.
+-- Fokus dihabiskan lebih dulu, jadi Bucks tidak bocor ke upgrade lain.
+local function luckyBelanja()
+    local ok = pcall(function()
+        local EU = require(Client:WaitForChild("EventUpgradeCmds"))
+        local Cur = require(Client:WaitForChild("CurrencyCmds"))
+
+        -- Fokus dulu, lalu sisanya. Dibangun tiap putaran supaya perubahan
+        -- config langsung berlaku tanpa restart script.
+        local fokus, sudah = {}, {}
+        for _, id in ipairs(Config.luckyFokus or LUCKY_FOKUS) do
+            fokus[#fokus + 1] = id
+            sudah[id] = true
+        end
+        local urut = {}
+        for _, id in ipairs(LUCKY_PRIORITAS) do
+            if not sudah[id] then urut[#urut + 1] = id end
+        end
+
+        -- Batas putaran: papan bisa memuntahkan Bucks bertubi-tubi, dan tanpa
+        -- batas satu putaran bisa menahan thread ini lama sekali.
+        for _ = 1, 40 do
+            local saldo = tonumber(select(2, pcall(function() return Cur.Get("BreakoutBucks") end))) or 0
+            local sasaran, biayaSasaran
+
+            -- DI DALAM FOKUS: yang TERMURAH duluan, bukan urutan daftar.
+            --
+            -- Terukur waktu dry-run: dengan urutan kaku, 48 Bucks habis ke 11x
+            -- Pet Slots dan Pet Speed TIDAK PERNAH kebagian -- karena slot
+            -- selalu lebih murah, jadi ia menang terus sampai tier 100. Padahal
+            -- yang diminta kedua-duanya. Termurah-duluan menaikkan keduanya
+            -- berbarengan dan tetap habis di harga yang sama.
+            for _, id in ipairs(fokus) do
+                local maks, biaya = luckyInfo(id)
+                if maks and biaya and saldo >= biaya
+                    and (not biayaSasaran or biaya < biayaSasaran) then
+                    sasaran, biayaSasaran = id, biaya
+                end
+            end
+
+            -- Di luar fokus urutannya tetap kaku: LUCKY_PRIORITAS memang sudah
+            -- disusun menurut kegunaan, bukan menurut harga.
+            if not sasaran then
+                for _, id in ipairs(urut) do
+                    local maks, biaya = luckyInfo(id)
+                    -- biaya nil = sudah tier maks. Tidak ditembak sama sekali --
+                    -- inilah bedanya dengan versi lama yang menembak semua.
+                    if maks and biaya and saldo >= biaya then
+                        sasaran, biayaSasaran = id, biaya
+                        break
                     end
                 end
+            end
 
-                if terbeli then
-                    MazeStatus.Text = string.format("Breakout upgrade: %s -> tier %s",
-                        tostring(terbeli):sub(14), tostring(tierBaru))
-                    catatPS("breakout upgrade %s -> tier %s", tostring(terbeli), tostring(tierBaru))
-                end
-            end)
+            if not sasaran then return end   -- tidak ada yang mampu dibeli
+
+            local okBeli, berhasil = pcall(EU.Purchase, sasaran)
+            if not (okBeli and berhasil == true) then return end
+
+            -- Jeda sebelum membaca tier: dibaca seketika sesudah Purchase,
+            -- nilainya masih yang LAMA (terukur melaporkan "tier 0" padahal
+            -- sudah jadi 1). Status salah lebih buruk daripada status telat.
+            task.wait(0.3)
+            local tierBaru = select(2, pcall(EU.GetTier, sasaran))
+            MazeStatus.Text = string.format("Breakout: %s -> tier %s (-%d Bucks)",
+                tostring(sasaran):sub(14), tostring(tierBaru), biayaSasaran)
+            catatPS("breakout upgrade %s -> tier %s, bayar %d",
+                tostring(sasaran), tostring(tierBaru), biayaSasaran)
         end
+    end)
+    return ok
+end
+
+task.spawn(function()
+    pcall(function() if setthreadidentity then setthreadidentity(2) end end)
+
+    -- INSTAN, bukan tiap 15 detik.
+    --
+    -- Jalur utama: sinyal perubahan simpanan (Save.GetStatChangedSignal), jadi
+    -- begitu Bucks mendarat belanja langsung berangkat.
+    --
+    -- Jalur cadangan TETAP ADA dan sengaja: nama stat yang dipakai sinyal itu
+    -- belum diverifikasi di V2, dan fitur yang diam total karena satu nama
+    -- meleset persis seperti bug "auto upgrade ga work" yang dulu. Poll 1 detik
+    -- tidak menembak remote apa pun kalau saldo tidak cukup, jadi murah.
+    pcall(function()
+        local Save = require(Client:WaitForChild("Save"))
+        for _, stat in ipairs({ "Inventory", "EventUpgrades" }) do
+            local okS, sinyal = pcall(Save.GetStatChangedSignal, stat)
+            if okS and sinyal and sinyal.Connect then
+                sinyal:Connect(function()
+                    if Config.luckyAutoUpgrade then luckyBelanja() end
+                end)
+            end
+        end
+    end)
+
+    while generasiIni() do
+        task.wait(1)
+        if Config.luckyAutoUpgrade then luckyBelanja() end
     end
 end)
 
