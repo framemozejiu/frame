@@ -55,6 +55,66 @@ perbandingan lintas-jendela di game ini selalu menipu. Ukur berpasangan.
 
 Aman sepanjang pengujian: 319 penolakan dalam 35 detik pun tidak memicu kick.
 
+GERBANG CANCEL -- WAJIB, DAN INI YANG DULU MEMBUNUH PANEN (diukur 2026-09-07)
+
+Server MENELAN FishingRequestStart yang datang terlalu cepat sesudah
+FishingCancel. Tidak ada `Denied`, tidak ada error, tidak ada balasan apa pun --
+jadi tidak ada satu pun jalur di script ini yang terpicu.
+
+Sapuan jeda cancel->tembak, PONDAREA1, ping 74 ms, 10-15 sampel per titik.
+Angkanya = berapa persen reroll yang benar-benar dibalas `Started`:
+
+    0,00=30%   0,05=20%   Stopped(~57ms)=10%   0,10=20%   0,13=33%
+    0,14=47%   0,15=73%   0,16=100%  0,17=100%  0,18=100%  0,20=100%  0,22=100%
+
+Gerbangnya ~0,15 detik, dan cocok dengan Constants.Fishing.AutoFish
+.RestartDelay = 0,2 yang dipakai auto fish milik game sendiri.
+
+Menunggu `Stopped` TIDAK cukup: balasan itu datang ~57 ms sesudah cancel, jauh
+di bawah gerbang, dan cuma 1 dari 10 yang lolos.
+
+AKIBATNYA di server bergerbang, build tanpa penangkal ini: 1 siklus, 1 reroll,
+lalu DIAM dengan Aktif tetap true dan konsol kosong. Diukur dua kali, salah
+satunya langsung dari berkas live di GitHub: 60 detik penuh, NOL tangkapan.
+
+GERBANGNYA TIDAK ADA DI SEMUA SERVER -- JANGAN BAYAR DI DEPAN
+
+Ini yang sempat salah dan bikin panen melambat: jeda 0,18 detik dipasang tanpa
+syarat sebelum tembakan reroll. Di server yang memang bergerbang itu benar,
+tapi pemakai melaporkan build TANPA jeda jalan cepat di servernya -- dan di
+sana jeda itu murni ongkos: reroll naik dari ~0,10 jadi ~0,28 detik, dan
+dengan ~2 reroll per tangkapan hasilnya terasa jelas lebih lelet.
+
+Karena itu jedanya dipindah ke BELAKANG. Tembakan pertama dikirim seketika
+seperti build lama; `Config.SusulanCancel` cuma jadwal cadangan yang jalan
+kalau tembakan itu ternyata ditelan, dan tiket membatalkannya begitu `Started`
+datang. Di server tanpa gerbang tidak ada satu pun paket tambahan terkirim.
+
+    server tanpa gerbang : tembakan pertama kena  -> ongkos ~0,10 dtk
+    server bergerbang    : susulan 0,22 yang kena -> ongkos ~0,30 dtk
+
+`MozeFishInfo().susulan` menghitung berapa kali susulan itu benar-benar perlu.
+NOL = server ini tidak bergerbang. Mendekati jumlah reroll = bergerbang. Pakai
+angka itu untuk menjawab keluhan "reroll lambat", jangan menebak.
+
+Diukur di server bergerbang, jendela 60 detik yang sama, karakter 7,7 stud dari
+kolam dan rod terpasang:
+
+    build live (GitHub, apa adanya)   0,0 tangkap/mnt    0,0 char/mnt
+    build ini (susulan adaptif)      46,9 tangkap/mnt  170,8 char/mnt
+                                     35 reroll, 57 susulan
+
+Biaya reroll ikut naik dari 0,096 jadi ~0,25 detik (0,18 gerbang + satu
+bolak-balik). Mode AUTO menyerapnya sendiri -- ambang optimumnya bergeser dari
+0,6 ke sekitar 1,25 detik. Hitungan dari 66 sampel waitSeconds nyata:
+
+    C=0,096 -> ambang 0,90   C=0,20 -> ambang 1,13   C=0,30 -> ambang 1,37
+    C=0,150 -> ambang 1,02   C=0,25 -> ambang 1,27   C=0,35 -> ambang 1,43
+
+Pada C=0,25 tolak-roll masih menang +23% atas tidak menolak sama sekali
+(0,988 vs 1,215 detik per putaran). Jadi fiturnya tetap berguna, tapi ANGKA
+0,6 YANG LAMA SUDAH TIDAK BERLAKU -- biarkan mode auto yang memilih.
+
 YANG **TIDAK** DILAKUKAN, DAN KENAPA
 
 Tidak menembak lebih dari sekali per `Completed`. Ini bukan sekadar
@@ -69,14 +129,31 @@ di pengukuran (1,219 -> 1,172, sedangkan sebarannya sendiri 0,29-2,20 dtk --
 selisih itu derau, bukan hasil). Yang memangkasnya cuma upgrade Faster Catch
 (Cash) dan potion fast catch, bukan script.
 
-Tidak mempercepat klik saat `Hooked`. INI SUDAH DIUJI DAN GAGAL -- jangan
-diulang:
+Tidak mempercepat klik saat `Hooked`. -- CATATAN INI SUDAH DIBALIK, lihat
+"KLIK DI HOOKED" di bawah. Yang lama, untuk arsip:
 
     Hooked -> Completed   baseline        0,091 dtk rata (med 0,066, n=32)
                           klik seketika   0,116 dtk rata (med 0,100, n=35)
 
-Jeda itu ternyata bolak-balik jaringan, bukan client yang menunda. Menembak
-lebih awal justru sedikit lebih lambat sekaligus menambah lalu lintas.
+KLIK DI HOOKED -- diukur ulang 2026-09-07, dan sekarang MENANG
+
+Fase `Progress` belum ada waktu uji di atas dijalankan. Sesudah fase itu
+masuk, menunggu `Progress` jadi mahal. Selang-seling per siklus di jendela yang
+SAMA (bukan perbandingan lintas-jendela), Hooked -> Completed:
+
+    tunggu Progress (cara lama)   n=34   rata 0,244   med 0,183
+    klik di Hooked                n=33   rata 0,081   med 0,074
+
+Hemat ~0,11 detik per tangkapan (median; rata-ratanya 0,16 tapi ekornya
+panjang). Di 28 dari 33, `Progress` TIDAK PERNAH DIKIRIM server -- kliknya
+sampai sebelum server perlu memintanya, jadi satu perjalanan pulang-pergi
+hilang seluruhnya. Lima sisanya tetap mengirim Progress dan dilayani cabang
+lama. Perhatikan juga: 0,074 itu praktis sama dengan med 0,066 di baseline
+lama. Yang dipangkas bukan jaringan, tapi fase Progress.
+
+Lalu lintasnya berkurang, bukan bertambah: kliknya tetap satu, satu event
+server hilang. Saklarnya `KlikDiHooked`, default NYALA. Cabang `Progress`
+tetap ada -- kolam yang meminta lebih dari satu klik dilayani dari sana.
 (`FishingClick:FireServer()` sendiri tidak menerima argumen apa pun.)
 
 Tidak membanjiri FishingClick SELAMA masa tunggu. Juga sudah diuji dan gagal:
@@ -261,6 +338,12 @@ local Config = {
     -- menembak ke tembok.
     MaksGagalBeruntun = tonumber(U.MaksGagalBeruntun) or 5,
     BatasBalasan      = tonumber(U.BatasBalasan) or 3,
+    -- Pengaman TERPISAH untuk penolakan. Dipisah dari MaksGagalBeruntun karena
+    -- ditolak dan didiamkan itu dua penyakit berbeda: `Denied` berarti server
+    -- masih menjawab, dan sebagian besar sebabnya (rod telat terpasang sesudah
+    -- rejoin, kolam berganti) pulih sendiri. Angkanya longgar: penolakan
+    -- didorong ulang tiap 1 detik, jadi 60 kira-kira satu menit mencoba dulu.
+    MaksDitolakBeruntun = tonumber(U.MaksDitolakBeruntun) or 60,
 
     -- ==== TOLAK-ROLL ====
     -- Kunci fiturnya: event `Started` mengumumkan `waitSeconds` SEBELUM
@@ -295,6 +378,74 @@ local Config = {
     -- server berhenti mengacak dan selalu mengirim angka besar. Tanpa ini,
     -- script bisa membatalkan selamanya dan MALAH tidak menangkap apa pun.
     MaksTolakBeruntun = tonumber(U.MaksTolakBeruntun) or 25,
+
+    -- Jeda WAJIB antara FishingCancel dan tembakan ulang.
+    --
+    -- Server MENELAN FishingRequestStart yang datang terlalu cepat sesudah
+    -- cancel: tidak ada `Denied`, tidak ada error, tidak ada balasan apa pun.
+    -- Karena tidak ada balasan, tidak ada satu pun jalur di script ini yang
+    -- terpicu -- dan sebelum perbaikan ini panennya BERHENTI TOTAL di reroll
+    -- pertama (terukur: 1 siklus, lalu 4 menit diam dengan Aktif tetap true).
+    --
+    -- Sapuan 2026-09-07, PONDAREA1, ping 74 ms, 10-15 sampel per titik,
+    -- angka = berapa persen reroll yang dibalas `Started`:
+    --   0,00=30%  0,05=20%  Stopped(~57ms)=10%  0,10=20%  0,13=33%
+    --   0,14=47%  0,15=73%  0,16=100%  0,17=100%  0,18=100%  0,20=100%  0,22=100%
+    --
+    -- Gerbangnya ~0,15 dtk dan cocok dengan Constants.Fishing.AutoFish
+    -- .RestartDelay = 0,2 yang dipakai auto fish milik game sendiri. 0,18
+    -- diambil sebagai batas aman terhadap jitter ping. JANGAN diturunkan di
+    -- bawah 0,16: reroll yang hilang tidak meninggalkan satu pun jejak.
+    --
+    -- Menunggu `Stopped` TIDAK cukup -- balasan itu datang ~57 ms sesudah
+    -- cancel, jauh di bawah gerbang, dan hanya 1 dari 10 yang lolos.
+    --
+    -- TAPI GERBANGNYA TIDAK ADA DI SEMUA SERVER. Diukur 2026-09-07: di satu
+    -- server ia jelas ada (30% lolos tanpa jeda), sementara pemakai melaporkan
+    -- build tanpa jeda sama sekali JALAN CEPAT di servernya. Menunggu 0,18
+    -- detik tanpa syarat berarti membayar ongkos itu juga di server yang tidak
+    -- memungutnya -- reroll naik dari ~0,10 jadi ~0,28 detik, dan dengan ~2
+    -- reroll per tangkapan itu terasa jelas lebih lambat.
+    --
+    -- Jadi jedanya TIDAK dipakai di depan. Tembakan pertama dikirim SEKETIKA
+    -- seperti dulu, dan angka-angka di bawah cuma jadwal SUSULAN yang jalan
+    -- kalau tembakan itu ternyata ditelan. Tiket membatalkan susulan begitu
+    -- `Started` datang, jadi di server tanpa gerbang tidak ada satu pun paket
+    -- tambahan yang terkirim.
+    --
+    --   server tanpa gerbang : tembakan pertama kena  -> ongkos ~0,10 dtk
+    --   server bergerbang    : susulan 0,22 yang kena -> ongkos ~0,30 dtk
+    --
+    -- Angka pertama harus DI ATAS gerbang ~0,15 dtk, dengan sisa untuk jitter.
+    SusulanCancel = (type(U.SusulanCancel) == "table" and U.SusulanCancel)
+                    or { 0.22, 0.50 },
+
+    -- Tembakan yang tidak dibalas sekian detik ditembak SEKALI lagi sebelum
+    -- dihitung gagal. Jaring pengaman untuk start yang ditelan server: tanpa
+    -- ini satu paket hilang berarti diam selamanya, karena tidak ada balasan
+    -- yang bisa memicu jalur pemulihan mana pun.
+    JedaUlangTembak = tonumber(U.JedaUlangTembak) or 0.9,
+
+    -- Kirim SATU FishingClick begitu `Hooked` datang, tanpa menunggu
+    -- `Progress`. Terukur 2026-09-07, selang-seling per siklus di jendela yang
+    -- sama (jadi bukan perbandingan lintas-jendela), Hooked -> Completed:
+    --
+    --   tunggu Progress (cara lama)  n=34  rata 0,244  med 0,183
+    --   klik di Hooked               n=33  rata 0,081  med 0,074
+    --
+    -- Hemat ~0,11 dtk PER TANGKAPAN (median). Dan di 28 dari 33, `Progress`
+    -- tidak pernah dikirim sama sekali: kliknya sampai sebelum server perlu
+    -- meminta, jadi seluruh perjalanan Progress hilang. Lalu lintasnya justru
+    -- berkurang (klik tetap satu, satu event server hilang).
+    --
+    -- INI MEMBALIK catatan lama "klik di Hooked sudah diuji dan gagal". Uji itu
+    -- benar untuk zamannya -- fase `Progress` belum ada, dan Hooked->Completed
+    -- baseline waktu itu 0,066 med, praktis sama dengan angka klik-di-Hooked
+    -- sekarang. Yang dipangkas bukan jaringan, tapi fase Progress.
+    --
+    -- Cabang Progress di bawah TETAP ada dan tetap perlu: kolam yang meminta
+    -- lebih dari satu klik masih dilayani dari sana.
+    KlikDiHooked = pilihSaklar("KlikDiHooked", true),
 
 
     -- ==== PILIH KOLAM OTOMATIS ====
@@ -365,7 +516,38 @@ local Config = {
     SpotJeda        = tonumber(U.SpotJeda) or 60,
     JedaPeriksaPond = tonumber(U.JedaPeriksaPond) or 20,
     -- Sejauh mana kolam masih dianggap milik kita saat script mendeteksi sendiri.
-    JangkauanKolam  = tonumber(U.JangkauanKolam) or 120,
+    --
+    -- Diukur 2026-09-07 dengan BERJALAN KAKI (bukan teleport) menjauh dari
+    -- permukaan kolam terdekat, 2-4 lemparan per titik:
+    --
+    --   10,3=2/2   24,9=2/2   38,8=2/2   40,9=4/4   44,0=4/4   47,0=4/4
+    --   50,2=0/4   54,2=0/2   62,1=0/2   70,0=0/2   80,4=0/2   104,6=0/2  (TOO_FAR)
+    --
+    -- Tebingnya PERSIS di 50, sama dengan
+    -- Constants.Fishing.Distances.MaxStartDistance. 47 masih lolos 4 dari 4,
+    -- 50,2 langsung 0 dari 4. Dipakai 45 supaya ada sisa untuk gerak kecil
+    -- karakter dan untuk selisih posisi client-server.
+    --
+    -- CARA MENGUKURNYA PENTING, dan dua kali sempat salah:
+    --   * TELEPORT memberi hasil palsu -- server masih memegang posisi lama,
+    --     jadi lemparan dari 100 stud pun diterima. Harus jalan kaki, lalu
+    --     diam sebentar supaya posisinya sampai.
+    --   * "PONDAREA1" itu LIMA part berbeda (113x97, 34x838, 44x129, 15x16,
+    --     58x99). Mengambil yang pertama ketemu memberi jarak yang salah
+    --     ratusan stud. Selalu ambil yang permukaannya TERDEKAT.
+    --
+    -- Nilai lama 120 membuat script terus melempar dari jarak yang PASTI
+    -- ditolak, dan penjaga penolakan yang mematikan diri.
+    JangkauanKolam  = tonumber(U.JangkauanKolam) or 45,
+
+    -- ==== KOLAM LAVA WAJIB ====
+    -- Begitu rod terkuat yang dimiliki menembus ambang ini, kolam lava yang
+    -- dipakai -- skor laju di bawah tidak ikut memutuskan. Lihat alasannya di
+    -- Kolam.nilai(). Ambang sebenarnya diambil dari RequiredStrength kolamnya
+    -- kalau developer menaikkannya, jadi angka di sini cuma lantai.
+    LavaWajib  = pilihSaklar("LavaWajib", true),
+    LavaKolam  = tostring(U.LavaKolam or "PONDAREA2"),
+    LavaAmbang = tonumber(U.LavaAmbang) or 2000,
     -- Kolam yang MEMAKSA rarity ini ke atas selalu menang atas skor laju.
     RarityPrioritas = U.RarityPrioritas or "Mythical",
     -- Isi nama kolam untuk mengunci pilihan dan melewati penilaian.
@@ -557,6 +739,26 @@ local S = {
     afkGagal    = 0,
     tolak       = 0,   -- roll dibuang seumur sesi
     tolakBeruntun = 0, -- dipakai pengaman anti-loop
+    -- Naik tiap kali server memberi kabar bahwa putaran berpindah (`Started`
+    -- atau `Completed`). Dipegang tembakan tertunda milik reroll supaya ia
+    -- membatalkan diri kalau keadaan sudah berubah selama jedanya.
+    tiket       = 0,
+    ulangTembak = 0,   -- berapa kali tembakan yang sama diulang
+    ping        = nil, -- ms, dibaca dari Stats -- BUKAN biaya reroll
+    -- DUA pencacah penolakan, sengaja terpisah:
+    --   ditolakBeruntun -- dipakai memicu pemindaian kolam tiap 3 penolakan,
+    --                      dan DISETEL ULANG tiap kali pemindaian jalan.
+    --   ditolakTotal    -- dipakai penjaga "menyerah", jadi ia TIDAK boleh
+    --                      ikut disetel ulang oleh pemindaian itu. Sempat
+    --                      dipakai satu pencacah untuk keduanya, dan penjaga
+    --                      menyerahnya jadi kode mati: angkanya tidak pernah
+    --                      bisa lewat 3.
+    ditolakTotal = 0,
+    -- Berapa kali susulan reroll benar-benar perlu ditembak. NOL berarti server
+    -- ini tidak memasang gerbang cancel; angka yang mendekati jumlah reroll
+    -- berarti memasangnya. Ditampilkan supaya bisa dijawab dengan data, bukan
+    -- tebakan, saat ada yang melapor "reroll-nya lambat".
+    susulan     = 0,
 
     -- Bahan penyetel otomatis.
     sampelWait  = {},  -- cincin: waitSeconds yang pernah terlihat
@@ -605,6 +807,20 @@ local function catat(fmt, ...)
     print("[MozeFish] " .. string.format(fmt, ...))
 end
 
+-- Ping jaringan SUNGGUHAN, dalam milidetik.
+--
+-- Ditambahkan karena panel dulu hanya menampilkan biaya reroll, dan angka itu
+-- gampang dibaca sebagai ping: nilainya 200-300 ms padahal pingnya 50-80.
+-- Selisihnya bukan koneksi yang buruk -- itu gerbang cancel milik server
+-- (lihat Config.SusulanCancel) yang di sebagian server harus ditunggu. Dengan
+-- tampil berdampingan, bedanya kelihatan tanpa perlu menebak.
+local function bacaPing()
+    local ok, v = pcall(function()
+        return game:GetService("Stats").Network.ServerStatsItem["Data Ping"]:GetValue()
+    end)
+    return ok and tonumber(v) or nil
+end
+
 -- =========================================================================
 -- PENEMBAK
 --
@@ -628,6 +844,17 @@ local function tembak()
     pcall(function()
         FishingRequestStart:FireServer(S.pond, S.target)
     end)
+end
+
+-- Tembak lagi TANPA memajukan jam penjaga.
+--
+-- S.menunggu harus tetap menunjuk tembakan PERTAMA yang tidak dibalas. Kalau
+-- percobaan ulang ikut menyetelnya, penjaga "server berhenti menjawab" tidak
+-- pernah sampai batasnya dan script menembak ke tembok selamanya.
+local function tembakUlang()
+    local ingat = S.menunggu
+    tembak()
+    S.menunggu = ingat
 end
 
 -- Menemukan kolam sendiri dari DUNIA, tanpa menunggu event Started.
@@ -1799,6 +2026,30 @@ function Kolam.nilai()
 
     local namaRod, kuat = rodTerkuat(F)
     Kolam.kekuatan = kuat
+
+    -- KOLAM LAVA WAJIB begitu kekuatannya cukup.
+    --
+    -- Penilai di bawah memakai KARAKTER PER DETIK, dan dengan ukuran itu
+    -- PONDAREA1 hampir selalu menang: waktu tangkapnya nyaris nol, sementara
+    -- lava membeli mutasi DENGAN waktu. Tapi skor itu mengukur LAJU, bukan
+    -- UANG -- tabel pengali harga tiap mutasi tidak ada di Constants, jadi
+    -- nilai lava tidak pernah bisa masuk hitungan dan skor akan selamanya
+    -- menolaknya. Karena itu keputusannya diambil DI LUAR skor.
+    --
+    -- Ambangnya diambil dari RequiredStrength kolam itu sendiri (terukur 2000
+    -- untuk PONDAREA2) supaya ikut kalau developer menaikkannya; Config.
+    -- LavaAmbang cuma lantai.
+    if Config.LavaWajib and F.Ponds[Config.LavaKolam] then
+        local perluLava = tonumber(F.Ponds[Config.LavaKolam].RequiredStrength) or 0
+        local ambangLava = math.max(perluLava, tonumber(Config.LavaAmbang) or 0)
+        -- Kolamnya harus benar-benar ADA di dunia. Kalau tidak, jatuh kembali
+        -- ke skor -- lebih baik memancing di kolam biasa daripada menembak ke
+        -- tempat kosong selamanya.
+        if kuat >= ambangLava and partKolam(Config.LavaKolam) then
+            return Config.LavaKolam, string.format("power %s >= %d, wajib lava",
+                angkaRingkas(kuat), ambangLava)
+        end
+    end
     local rodCfg = namaRod and F.Rods and F.Rods[namaRod] or nil
 
     -- Ongkos tetap tiap siklus di luar penungguan: restart + jaringan. Diukur
@@ -1945,16 +2196,38 @@ S.conn[#S.conn + 1] = FishingState.OnClientEvent:Connect(function(d)
     end
 
     if kind == "Denied" then
-        -- Dibatasi 5 detik sekali: kalau sebabnya bukan rod, mengulang
-        -- pemasangan secepat lemparan ditolak cuma menghasilkan banjir.
-        if tostring(d.reason) == "NO_ROD"
-           and (not S.tDitolak or (t - S.tDitolak) > 5) then
-            S.tDitolak = t
-            pasangRodTerbaik()
-            -- Lempar lagi supaya siklus tidak menunggu pemicu berikutnya;
-            -- tanpa ini script bisa diam sampai ada Started dari mana pun.
-            task.delay(1, tembak)
+        -- `Denied` itu JAWABAN, bukan kesunyian. Penjaga `gagalBeruntun` di
+        -- bawah bertugas mengenali "server berhenti menjawab kita" -- kalau
+        -- penolakan ikut dihitung ke sana, ia salah sasaran.
+        --
+        -- Terukur 2026-09-07: tanpa rod terpasang server membalas
+        -- `Denied/NO_ROD` 3 dari 3 kali. Sesudah rejoin rod memang belum
+        -- terpasang beberapa detik -- dan dengan tembakan ulang yang sekarang
+        -- ada, script sempat sampai ke batas 5 lalu MEMATIKAN DIRI padahal
+        -- server menjawab terus dan keadaannya pulih sendiri.
+        S.menunggu = nil
+        S.ulangTembak = 0
+
+        if tostring(d.reason) == "NO_ROD" then
+            -- NO_ROD TIDAK PERNAH menaikkan pencacah penolakan. Ia hampir
+            -- selalu sembuh sendiri (paling sering: beberapa detik pertama
+            -- sesudah rejoin, sebelum rod terpasang), dan menghitungnya sama
+            -- saja mengembalikan bug yang baru dibuang.
             S.ditolakBeruntun = 0
+            S.ditolakTotal = 0
+            -- Pemasangan rod-nya yang dibatasi 5 detik sekali -- mengulanginya
+            -- secepat lemparan ditolak cuma menghasilkan banjir.
+            if not S.tDitolak or (t - S.tDitolak) > 5 then
+                S.tDitolak = t
+                pasangRodTerbaik()
+            end
+            -- Lempar lagi SELALU, juga saat pemasangan sedang dibatasi. Dulu
+            -- cabang ini keluar tanpa melempar saat kena batas, dan yang
+            -- menahannya tetap hidup cuma jatuh ke cabang umum di bawah.
+            -- Sekarang cabang itu tidak lagi dilewati, jadi tanpa baris ini
+            -- tidak ada satu pun tembakan berjalan -- dan tidak ada kejadian
+            -- yang bisa membangunkan siklus lagi.
+            task.delay(1, tembak)
             return
         end
 
@@ -1970,20 +2243,46 @@ S.conn[#S.conn + 1] = FishingState.OnClientEvent:Connect(function(d)
         -- script diam selamanya. Ditunggu tiga kali dulu supaya penolakan
         -- sesaat tidak memicu pemindaian workspace yang mahal.
         S.ditolakBeruntun = (S.ditolakBeruntun or 0) + 1
+        S.ditolakTotal = (S.ditolakTotal or 0) + 1
+
+        -- Pengganti penjaga yang dilepas di atas. Bedanya: yang ini menghitung
+        -- PENOLAKAN, bukan kesunyian, jadi ia tidak ikut menyala oleh rod yang
+        -- telat terpasang (NO_ROD menyetel ulang pencacahnya).
+        if S.ditolakTotal >= Config.MaksDitolakBeruntun then
+            catat("BERHENTI: %d penolakan beruntun (%s). Server mungkin berubah "
+                .. "atau posisinya salah -- periksa dulu sebelum dinyalakan lagi.",
+                S.ditolakTotal, tostring(d.reason))
+            Config.Aktif = false
+            S.ditolakBeruntun, S.ditolakTotal = 0, 0
+            if Gui.ada then pcall(Gui.cat) end
+            return
+        end
+
         if S.ditolakBeruntun >= 3
            and (not S.tDeteksi or (t - S.tDeteksi) > 3) then
             S.tDeteksi = t
             S.ditolakBeruntun = 0
-            if deteksiKolam() then
-                if Gui.ada then pcall(Gui.catPond) end
-                task.delay(0.3, tembak)
-            end
+            if deteksiKolam() and Gui.ada then pcall(Gui.catPond) end
         end
+
+        -- Dorongan HARUS eksplisit di sini. Sebelumnya yang menahan putaran ini
+        -- tetap hidup adalah penjaga kesunyian: `S.menunggu` dibiarkan terisi,
+        -- lalu penjaga itu menembak lagi tiap BatasBalasan detik. Sekarang
+        -- `Denied` membersihkan S.menunggu (itu memang jawaban, bukan
+        -- kesunyian), jadi tanpa baris ini satu penolakan berarti diam
+        -- selamanya -- tidak ada tembakan berjalan, tidak ada kejadian
+        -- berikutnya, tidak ada pemindaian kolam yang pernah kena.
+        task.delay(1, tembak)
         return
     end
 
     if kind == "Started" then
         S.ditolakBeruntun = 0
+        S.ditolakTotal = 0
+        -- Putaran berpindah: tembakan tertunda apa pun yang masih menunggu
+        -- jedanya sudah tidak berlaku lagi.
+        S.tiket = S.tiket + 1
+        S.ulangTembak = 0
         -- Selalu segarkan: pemain bisa pindah kolam, dan targetPos ikut geser.
         if d.targetPos then S.target = d.targetPos end
         if d.pondName and d.pondName ~= S.pondName then
@@ -2074,7 +2373,22 @@ S.conn[#S.conn + 1] = FishingState.OnClientEvent:Connect(function(d)
             S.tolakBeruntun = S.tolakBeruntun + 1
             S.tTolak = t
             pcall(function() FishingCancel:FireServer() end)
+            local tiket = S.tiket
+            -- SEKETIKA, seperti build lama. Di server tanpa gerbang inilah yang
+            -- kena, dan ongkos reroll tetap semurah dulu.
             tembak()
+            -- Susulan hanya untuk server yang MEMASANG gerbang. Tiket
+            -- membatalkannya begitu `Started` datang, jadi kalau tembakan di
+            -- atas berhasil, tidak ada satu pun paket tambahan yang terkirim.
+            -- Lihat catatan panjang di Config.SusulanCancel.
+            for _, jeda in ipairs(Config.SusulanCancel) do
+                task.delay(jeda, function()
+                    if S.hidup and S.tiket == tiket then
+                        S.susulan = (S.susulan or 0) + 1
+                        tembakUlang()
+                    end
+                end)
+            end
             return
         end
 
@@ -2088,6 +2402,15 @@ S.conn[#S.conn + 1] = FishingState.OnClientEvent:Connect(function(d)
         -- benar-benar datang roll bagus.
         if w and w < ambang() then
             S.tolakBeruntun = 0
+        end
+
+    elseif kind == "Hooked" then
+        -- Satu klik SEKARANG. Lihat catatan ukur di Config.KlikDiHooked.
+        -- Sengaja cuma satu: berapa klik yang diminta baru diketahui dari
+        -- `Progress`, dan kalau memang lebih dari satu, cabang di bawah yang
+        -- menutupinya. Menembak lebih banyak di sini cuma menebak.
+        if Config.KlikDiHooked and FishingClick then
+            pcall(function() FishingClick:FireServer() end)
         end
 
     elseif kind == "Progress" then
@@ -2110,6 +2433,8 @@ S.conn[#S.conn + 1] = FishingState.OnClientEvent:Connect(function(d)
 
     elseif kind == "Completed" then
         if not S.tMulai then S.tMulai = t end
+        S.tiket = S.tiket + 1
+        S.ulangTembak = 0
         S.siklus = S.siklus + 1
         -- Dihitung dengan pairs, bukan #d.rewards: panjang tabel Luau tidak
         -- bisa dipercaya untuk tabel yang datang dari jaringan -- terukur
@@ -2438,11 +2763,16 @@ local function bangunGui()
     -- Angka besar sekarang KARAKTER per menit, bukan siklus. Keduanya dikirim
     -- supaya barisan rincinya tetap bisa menunjukkan laju tangkapan -- dua
     -- angka itu berbeda jauh begitu multi-pull aktif.
+    -- Ping dan biaya reroll ditulis berdampingan dengan label masing-masing.
+    -- Sengaja: yang satu milik koneksi, yang satu milik server (gerbang cancel
+    -- ~0,18 dtk + satu bolak-balik). Dulu cuma biaya reroll yang tampil, dan
+    -- angkanya dikira ping yang jelek -- 250 ms padahal pingnya 50-80.
     local function catStat(karPerMenit, tangkapPerMenit, karakter, tolak, biaya)
         angka.Text = string.format("%.1f", karPerMenit or 0)
-        rinci.Text = string.format("%d char · %.0f catch/min · rerolls %d · %s",
+        rinci.Text = string.format("%d char · %.0f catch/min · rerolls %d · %s%s",
             karakter or 0, tangkapPerMenit or 0, tolak or 0,
-            biaya and string.format("%.0fms", biaya * 1000) or "--")
+            S.ping and string.format("ping %.0fms · ", S.ping) or "",
+            biaya and string.format("reroll %.0fms", biaya * 1000) or "--")
     end
 
     -- Tombol ini TIDAK memindahkan apa pun -- ia melapor. Yang ditampilkan
@@ -3139,6 +3469,10 @@ task.spawn(function()
             S.fps = S.frame / math.max(0.001, lewat)
             S.frame = 0
             fpsBerikut = os.clock() + 1
+            -- Ping dibaca di irama yang sama: sekali per detik sudah cukup
+            -- untuk sebuah angka tampilan, dan Stats itu instance milik engine
+            -- yang pembacaannya tidak gratis.
+            S.ping = bacaPing()
             if Gui.ada then pcall(function() Gui.catFps(S.fps) end) end
         end
 
@@ -3149,8 +3483,20 @@ task.spawn(function()
             bersihkanTali()
         end
 
+        -- Satu percobaan ulang SEBELUM dihitung gagal. Start yang ditelan
+        -- server tidak membalas apa pun, jadi tanpa jaring ini tidak ada satu
+        -- pun kejadian yang bisa membangunkan siklus lagi -- terukur: script
+        -- diam 4 menit dengan Aktif tetap true.
+        if S.menunggu and S.ulangTembak < 1
+           and (os.clock() - S.menunggu) > Config.JedaUlangTembak
+           and (os.clock() - S.menunggu) <= Config.BatasBalasan then
+            S.ulangTembak = S.ulangTembak + 1
+            tembakUlang()
+        end
+
         if S.menunggu and (os.clock() - S.menunggu) > Config.BatasBalasan then
             S.menunggu = nil
+            S.ulangTembak = 0
             S.gagalBeruntun = S.gagalBeruntun + 1
             if S.gagalBeruntun >= Config.MaksGagalBeruntun then
                 catat("BERHENTI: %d tembakan beruntun tidak dibalas dalam %.0f dtk. "
@@ -3161,6 +3507,12 @@ task.spawn(function()
                 -- padahal script sudah mematikan diri itu bohong ke pemakai,
                 -- dan bikin salah menyimpulkan kenapa tangkapan melambat.
                 if Gui.ada then pcall(Gui.cat) end
+            else
+                -- Coba lagi. Tanpa baris ini penjaga di atas MUSTAHIL sampai
+                -- ke batasnya: tidak ada satu pun tembakan baru sesudah
+                -- kegagalan pertama, jadi pencacahnya berhenti di 1 dan
+                -- script diam tanpa pernah mengaku berhenti.
+                tembak()
             end
         end
 
@@ -3279,14 +3631,34 @@ end
 -- berada **564 stud** dari sana dengan NOL tangkapan, dan tidak pernah
 -- berangkat. Nama tidak boleh dipakai sebagai bukti posisi.
 --
--- Ambang 120 stud: mancing terbukti jalan dari 41 stud, jadi 120 masih jauh
--- di atas jarak kerja yang wajar dan tidak akan memicu perpindahan palsu.
+-- Diukur ke PERMUKAAN terdekat, bukan ke Position part-nya, dan memakai
+-- ambang yang sama dengan deteksi kolam (Config.JangkauanKolam = 45, batas
+-- server 50).
+--
+-- Dua hal yang dulu salah di sini:
+--   * satu kolam bisa terdiri dari BEBERAPA part -- PONDAREA1 ada lima, salah
+--     satunya 837 stud panjangnya. Jarak ke Position bisa ratusan stud padahal
+--     kita berdiri tepat di tepinya, dan auto spot berangkat tanpa alasan.
+--   * ambang 120 jauh di atas jarak lempar yang sebenarnya (50), jadi berdiri
+--     80 stud dari kolam dianggap "sudah di sana" -- padahal tiap lemparan
+--     dari situ pasti dibalas TOO_FAR.
 local function jauhDariKolam(nama)
-    local part = partKolam(nama)
-    if not part then return true end
     local hrp = PemainLokal.Character and PemainLokal.Character:FindFirstChild("HumanoidRootPart")
     if not hrp then return false end
-    return (part.Position - hrp.Position).Magnitude > 120
+    local dekat = math.huge
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("BasePart") and d.Name == nama then
+            local l = d.CFrame:PointToObjectSpace(hrp.Position)
+            local h = d.Size / 2
+            local luar = Vector3.new(
+                math.max(math.abs(l.X) - h.X, 0),
+                math.max(math.abs(l.Y) - h.Y, 0),
+                math.max(math.abs(l.Z) - h.Z, 0))
+            if luar.Magnitude < dekat then dekat = luar.Magnitude end
+        end
+    end
+    if dekat == math.huge then return true end
+    return dekat > Config.JangkauanKolam
 end
 
 -- Memindahkan karakter ke penanda TP kolam. Dipakai saat pemulihan, bukan cuma
@@ -3904,6 +4276,12 @@ getgenv().MozeFishInfo = function()
         ambangSetel = Config.AmbangRoll,          -- "auto" atau angka manual
         ambangPakai = ambang(),                   -- yang benar-benar berlaku
         biayaReroll = S.biaya,
+        -- Sengaja dipisah dari biayaReroll: biaya reroll = gerbang cancel
+        -- server (SusulanCancel) + satu bolak-balik. Ping saja jauh lebih kecil.
+        ping        = S.ping,
+        susulan     = S.susulan,
+        tembak      = S.tembak,
+        diterima    = S.diterima,
         siklus      = S.siklus,
         tolak       = S.tolak,
         charPerMenit = (jalan > 0) and (S.karakter / jalan * 60) or 0,
