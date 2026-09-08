@@ -369,6 +369,12 @@ local Config = {
     -- itu persis gejalanya. 1,8 diambil supaya ada sisa untuk ping yang jelek.
     JedaSetelahPindah = tonumber(U.JedaSetelahPindah) or 1.8,
 
+    -- Sasaran gem yang dihitung ETA-nya di panel. Bawaannya harga Quintuple
+    -- Hook di Gem Store (Offer5) -- terbaca 25.000.000 Gems / 3.289 Robux, dan
+    -- itu satu-satunya cara menambah hook selain Sacrifice pertama.
+    -- Isi 0 untuk mematikan barisnya.
+    TargetGem = tonumber(U.TargetGem) or 25000000,
+
     -- ==== TOLAK-ROLL ====
     -- Kunci fiturnya: event `Started` mengumumkan `waitSeconds` SEBELUM
     -- penungguan dimulai. Kalau undiannya jelek, batalkan dan minta undian
@@ -797,6 +803,9 @@ local S = {
     cashLaju    = nil,  -- cash per detik
     cashAkhir   = nil,
     tCash       = nil,
+    gemLaju     = nil,  -- gem per detik
+    gemAkhir    = nil,
+    tGem        = nil,
     rebirthNo   = nil,  -- nomor rebirth berikutnya
     rebirthHrg  = nil,  -- biayanya
     rebirthRank = nil,
@@ -1109,7 +1118,27 @@ local FJ_KANAN = "rbxassetid://104624206636533"
 
 -- Upgrade yang ditampilkan, berurutan. Kode aslinya (T1O1 dst) tidak berarti
 -- apa-apa bagi pemakai, jadi labelnya diambil dari Constants saat jalan.
+-- Lima ini didahulukan karena paling sering diurus; SISANYA ikut otomatis
+-- (lihat daftarUpgrade). Dulu daftar ini yang menentukan apa yang tampil, jadi
+-- 9 dari 14 upgrade tidak pernah kelihatan sama sekali di layar hitam.
 local URUT_UPGRADE = { "T3O3", "T1O1", "T1O2", "T5O2", "T5O1" }
+
+-- Urutan tampil: yang diprioritaskan dulu, lalu sisa apa pun yang ada di
+-- Constants. Dibuat dari Constants, BUKAN ditulis mati, supaya upgrade baru
+-- dari developer ikut muncul tanpa menyentuh script.
+local function daftarUpgrade(Offers)
+    local urut, sudah = {}, {}
+    for _, kode in ipairs(URUT_UPGRADE) do
+        if Offers[kode] then urut[#urut + 1] = kode; sudah[kode] = true end
+    end
+    local sisa = {}
+    for kode in pairs(Offers) do
+        if not sudah[kode] then sisa[#sisa + 1] = kode end
+    end
+    table.sort(sisa)
+    for _, kode in ipairs(sisa) do urut[#urut + 1] = kode end
+    return urut
+end
 
 local function angkaPendek(n)
     n = tonumber(n) or 0
@@ -1210,15 +1239,21 @@ local function buatLayar()
     kepalaUpg.Text = "Upgrade :"
     kepalaUpg.Parent = bg
 
+    -- Tinggi dan ukuran teks dihitung untuk 14 upgrade. Sebelumnya 22pt /
+    -- LineHeight 1,4 di frame 220 px: itu cuma cukup untuk 7 baris, dan sisanya
+    -- MELUBER ke bawah menutupi feed "Caught ..." -- frame TextLabel tidak
+    -- memotong teks yang kepanjangan, jadi tumpangnya tidak kelihatan sebagai
+    -- error, cuma sebagai notif yang hilang.
+    --   14 baris x (15 x 1,25) = ~263 px, dibulatkan 270.
     local tabel = Instance.new("TextLabel")
     tabel.Name = "Tabel"
-    tabel.Size = UDim2.new(0, 560, 0, 220)
+    tabel.Size = UDim2.new(0, 560, 0, 270)
     tabel.Position = UDim2.new(0.5, 0, 0, 134)
     tabel.AnchorPoint = Vector2.new(0.5, 0)
     tabel.BackgroundTransparency = 1
     tabel.Font = Enum.Font.Gotham
-    tabel.TextSize = 22
-    tabel.LineHeight = 1.4
+    tabel.TextSize = 15
+    tabel.LineHeight = 1.25
     tabel.TextColor3 = Color3.fromRGB(226, 226, 232)
     tabel.TextXAlignment = Enum.TextXAlignment.Center
     tabel.TextYAlignment = Enum.TextYAlignment.Top
@@ -1230,21 +1265,27 @@ local function buatLayar()
     -- ---- FEED "Caught ..." (DI TENGAH) ----
     -- 16 baris, bukan 8: feed pendek habis dalam belasan detik saat multi-hook,
     -- dan yang menarik justru barisan panjangnya.
+    -- Diturunkan dari 412 ke 424 supaya mulai DI BAWAH tabel upgrade (yang kini
+    -- berakhir di 404), dan tingginya dipas supaya berhenti sebelum kartu
+    -- Best Catch yang menempel di bawah layar (1, -286).
+    --   14 baris x 25 px = 350 -> 424..774.
     local feed = Instance.new("Frame")
-    feed.Size = UDim2.new(0, 620, 0, 430)
-    feed.Position = UDim2.new(0.5, 0, 0, 412)
+    feed.Size = UDim2.new(0, 620, 0, 350)
+    feed.Position = UDim2.new(0.5, 0, 0, 424)
     feed.AnchorPoint = Vector2.new(0.5, 0)
     feed.BackgroundTransparency = 1
     feed.Parent = bg
     local tataFeed = Instance.new("UIListLayout")
     tataFeed.SortOrder = Enum.SortOrder.LayoutOrder
     tataFeed.HorizontalAlignment = Enum.HorizontalAlignment.Center
-    tataFeed.Padding = UDim.new(0, 3)
+    tataFeed.Padding = UDim.new(0, 2)
     tataFeed.Parent = feed
-    for i = 1, 16 do
+    -- 14, turun dari 16: dua baris terakhir dulu jatuh di belakang kartu Best
+    -- Catch dan tidak pernah benar-benar terbaca.
+    for i = 1, 14 do
         local l = Instance.new("TextLabel")
         l.LayoutOrder = i
-        l.Size = UDim2.new(1, 0, 0, 25)
+        l.Size = UDim2.new(1, 0, 0, 23)
         l.BackgroundTransparency = 1
         l.Font = Enum.Font.Gotham
         l.TextSize = 21
@@ -1444,17 +1485,18 @@ local function segarkanUpgrade()
         local level = (st and st.levels) or {}
         local O = C.UpgradesStore.Offers
         local baris = {}
-        for _, kode in ipairs(URUT_UPGRADE) do
+        for _, kode in ipairs(daftarUpgrade(O)) do
             local cfg = O[kode]
             if cfg then
                 local lv = tonumber(level[kode]) or 0
                 local mx = tonumber(cfg.MaxLevels) or 0
-                -- Yang sudah mentok diberi warna berbeda supaya sekilas terlihat
-                -- mana yang masih perlu diurus.
-                local warna = (lv >= mx and mx > 0) and "rgb(120,220,150)" or "rgb(226,226,232)"
-                baris[#baris + 1] = string.format(
-                    "%s  <font color=\"%s\"><b>%d</b> : %d</font>",
-                    tostring(cfg.Label or kode), warna, lv, mx)
+                local mentok = (mx > 0 and lv >= mx)
+                -- Yang sudah mentok ditulis MAX, bukan "300 : 300" -- angka
+                -- kembar itu harus dibaca dulu untuk tahu artinya sudah selesai.
+                local warna = mentok and "rgb(120,220,150)" or "rgb(226,226,232)"
+                local nilai = mentok and "MAX" or string.format("<b>%d</b> : %d", lv, mx)
+                baris[#baris + 1] = string.format("%s  <font color=\"%s\">%s</font>",
+                    tostring(cfg.Label or kode), warna, nilai)
             end
         end
         return table.concat(baris, "\n")
@@ -2596,8 +2638,8 @@ local function bangunGui()
     -- Di 212 px label terpaksa dipotong jadi "RAR: Anci" dan status seperti
     -- "nabung 24.6M>20.4M" tidak muat -- panel yang tidak terbaca sama saja
     -- dengan panel yang tidak ada.
-    -- TINGGI dinaikkan dari 358 ke 396 untuk memberi tempat blok ETA di bawah.
-    local LEBAR, TINGGI, TINGGI_KECIL = 250, 396, 32
+    -- TINGGI dinaikkan dari 358 ke 412 untuk memberi tempat blok ETA 3 baris.
+    local LEBAR, TINGGI, TINGGI_KECIL = 250, 412, 32
 
     local bingkai = Instance.new("Frame")
     bingkai.Name = "Panel"
@@ -2796,7 +2838,7 @@ local function bangunGui()
     lblEta.Name = "Eta"
     lblEta.BackgroundTransparency = 1
     lblEta.Position = UDim2.fromOffset(14, 320)
-    lblEta.Size = UDim2.new(1, -28, 0, 30)
+    lblEta.Size = UDim2.new(1, -28, 0, 46)
     lblEta.Font = Enum.Font.Code
     lblEta.TextSize = 10
     lblEta.TextXAlignment = Enum.TextXAlignment.Left
@@ -2907,6 +2949,24 @@ local function bangunGui()
             end
         end
         local b1 = table.concat(baris, "  ·  ")
+
+        -- Baris gem. Sasarannya Quintuple Hook -- lihat Config.TargetGem.
+        local bg
+        local target = tonumber(Config.TargetGem) or 0
+        if S.gemAkhir then
+            local laju = S.gemLaju
+            local kiri = { "gems " .. ((laju and laju > 0) and (angkaRingkas(laju) .. "/s") or "--/s") }
+            if target > 0 then
+                local sisa = target - S.gemAkhir
+                if sisa <= 0 then
+                    kiri[#kiri + 1] = "quintuple READY"
+                else
+                    kiri[#kiri + 1] = "quintuple in "
+                        .. lamanya((laju and laju > 0) and (sisa / laju) or nil)
+                end
+            end
+            bg = table.concat(kiri, "  ·  ")
+        end
         -- Baris kedua sengaja PROGRES LEVEL, bukan ETA harga: remote
         -- UpgradesStoreGetState cuma mengembalikan level, dan tidak ada rumus
         -- harga di Constants. Menampilkan ETA di sini berarti mengarang angka.
@@ -2915,7 +2975,10 @@ local function bangunGui()
             b2 = string.format("%s %d/%s", S.upgNama, S.upgLvl,
                 tostring(S.upgMaks or "?"))
         end
-        lblEta.Text = b2 and (b1 .. "\n" .. b2) or b1
+        local semua = { b1 }
+        if bg then semua[#semua + 1] = bg end
+        if b2 then semua[#semua + 1] = b2 end
+        lblEta.Text = table.concat(semua, "\n")
     end
 
     -- Tombol ini TIDAK memindahkan apa pun -- ia melapor. Yang ditampilkan
@@ -3631,6 +3694,18 @@ task.spawn(function()
                     end
                 end
                 S.cashAkhir, S.tCash = kini, jam
+            end)
+            -- Gem, cara yang sama. Turun = belanja, bukan laju negatif.
+            pcall(function()
+                local kini = tonumber(PemainLokal:GetAttribute("GemsNumber"))
+                local jam = os.clock()
+                if kini and S.gemAkhir and S.tGem and jam > S.tGem then
+                    local d = (kini - S.gemAkhir) / (jam - S.tGem)
+                    if d >= 0 then
+                        S.gemLaju = S.gemLaju and (S.gemLaju + 0.2 * (d - S.gemLaju)) or d
+                    end
+                end
+                S.gemAkhir, S.tGem = kini, jam
             end)
             if Gui.ada then
                 pcall(function() Gui.catFps(S.fps) end)
@@ -4546,6 +4621,8 @@ getgenv().MozeFishInfo = function()
         -- server (SusulanCancel) + satu bolak-balik. Ping saja jauh lebih kecil.
         ping        = S.ping,
         susulan     = S.susulan,
+        cashPerDetik = S.cashLaju,
+        gemPerDetik = S.gemLaju,
         -- Diisi hanya saat script mematikan diri. Kalau panen berhenti dan
         -- `aktif` false, INI yang menjelaskan kenapa.
         sebabBerhenti = S.sebabBerhenti,
