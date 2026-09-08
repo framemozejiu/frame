@@ -3955,6 +3955,24 @@ pulihKolam = function()
     return pastikanMancing(nama, 3)
 end
 
+-- Kolam TUJUAN PULANG sesudah karakter dibawa pergi (feed, atau apa pun).
+--
+-- JANGAN memakai S.pondName untuk ini. Nilai itu ditimpa oleh deteksiKolam()
+-- dengan kolam yang PALING DEKAT (baris `S.pond, S.pondName = zona, zona.Name`),
+-- dan selama feed karakter berdiri di plot -- di sana yang terdekat PONDAREA1.
+-- Akibatnya nyata dan dilaporkan pemakai: sesudah feed selalu pulang ke pond 1
+-- padahal sedang dikunci di lava.
+--
+-- Yang benar itu kolam PILIHAN penilai, karena di situlah aturan lava wajib
+-- ikut dihitung. Kalau penilai belum pernah jalan (SaranKolam mati), nilai
+-- sekarang juga -- sekali per kepulangan, ongkosnya tidak berarti.
+local function kolamPulang(cadangan)
+    if Kolam.pilihan then return Kolam.pilihan end
+    local ok, nama = pcall(Kolam.nilai)
+    if ok and nama then return nama end
+    return cadangan
+end
+
 -- =========================================================================
 -- AUTO FEED -- menaikkan level karakter di plot sendiri
 --
@@ -4197,7 +4215,8 @@ local function feedSesi()
     if jatah > pagar then jatah = pagar end
     if jatah < 0 then jatah = 0 end
 
-    local kolamAsal = S.pondName or Kolam.pilihan
+    -- Pilihan penilai didahulukan; S.pondName cuma cadangan. Lihat kolamPulang.
+    local kolamAsal = Kolam.pilihan or S.pondName
     local asal = hrp.CFrame
     local naik, dicoba, dilewati, belanja = 0, 0, 0, 0
 
@@ -4291,7 +4310,7 @@ local function feedSesi()
             Feed.status = "saving " .. angkaRingkas(termurah) .. ">" .. angkaRingkas(jatah)
         end
         -- Sudah terlanjur meninggalkan kolam, jadi tetap dinyalakan ulang.
-        pastikanMancing(kolamAsal)
+        pastikanMancing(kolamPulang(kolamAsal))
         return
     end
 
@@ -4386,10 +4405,11 @@ local function feedSesi()
     -- penanda TP -- jalur yang sama dengan auto spot dan sudah terbukti
     -- (564 stud -> 41 stud, tangkapan lanjut). Mengembalikan CFrame apa adanya
     -- saja tidak cukup untuk kolam yang jauh dari plot.
-    if kolamAsal and jauhDariKolam(kolamAsal) then
-        keTitikKolam(kolamAsal)
+    local tujuan = kolamPulang(kolamAsal)
+    if tujuan and jauhDariKolam(tujuan) then
+        keTitikKolam(tujuan)
     end
-    pastikanMancing(kolamAsal)
+    pastikanMancing(tujuan)
 end
 
 -- =========================================================================
