@@ -344,6 +344,12 @@ local Config = {
     -- rejoin, kolam berganti) pulih sendiri. Angkanya longgar: penolakan
     -- didorong ulang tiap 1 detik, jadi 60 kira-kira satu menit mencoba dulu.
     MaksDitolakBeruntun = tonumber(U.MaksDitolakBeruntun) or 60,
+    -- Tiap sekian penolakan, coba KEMBALI KE KOLAM dulu sebelum menyerah.
+    -- Penyebab TOO_FAR yang paling sering itu posisi, dan posisi bisa
+    -- diperbaiki sendiri.
+    TiapBerapaPulih = tonumber(U.TiapBerapaPulih) or 8,
+    -- Baru menyerah kalau pemulihan posisinya sendiri yang gagal.
+    MaksPulihGagal  = tonumber(U.MaksPulihGagal) or 4,
 
     -- ==== TOLAK-ROLL ====
     -- Kunci fiturnya: event `Started` mengumumkan `waitSeconds` SEBELUM
@@ -754,6 +760,9 @@ local S = {
     --                      menyerahnya jadi kode mati: angkanya tidak pernah
     --                      bisa lewat 3.
     ditolakTotal = 0,
+    pulihGagal   = 0,   -- berapa kali usaha kembali ke kolam gagal
+    sedangPulih  = false,
+    sebabBerhenti = nil, -- diisi saat script mematikan diri, dibaca dari panel/Info
     -- Berapa kali susulan reroll benar-benar perlu ditembak. NOL berarti server
     -- ini tidak memasang gerbang cancel; angka yang mendekati jumlah reroll
     -- berarti memasangnya. Ditampilkan supaya bisa dijawab dengan data, bukan
@@ -955,6 +964,11 @@ end
 -- melempar error dan tolak-roll mati diam-diam. Ketahuan dari luau-analyze
 -- (LocalShadow), bukan dari mata.
 local Gui = { ada = false }
+
+-- Dideklarasikan di sini, DIISI jauh di bawah sesudah keTitikKolam dan
+-- pastikanMancing ada. Handler penolakan berada di atas keduanya, dan tanpa
+-- deklarasi maju ini pemanggilannya membaca global nil.
+local pulihKolam
 
 -- Dideklarasikan di sini, bukan di modul boost jauh di bawah: panel dibangun
 -- SEBELUM modul itu, dan tombolnya perlu memanggil Boost.jalankan.
@@ -2245,15 +2259,45 @@ S.conn[#S.conn + 1] = FishingState.OnClientEvent:Connect(function(d)
         S.ditolakBeruntun = (S.ditolakBeruntun or 0) + 1
         S.ditolakTotal = (S.ditolakTotal or 0) + 1
 
-        -- Pengganti penjaga yang dilepas di atas. Bedanya: yang ini menghitung
-        -- PENOLAKAN, bukan kesunyian, jadi ia tidak ikut menyala oleh rod yang
-        -- telat terpasang (NO_ROD menyetel ulang pencacahnya).
-        if S.ditolakTotal >= Config.MaksDitolakBeruntun then
-            catat("BERHENTI: %d penolakan beruntun (%s). Server mungkin berubah "
-                .. "atau posisinya salah -- periksa dulu sebelum dinyalakan lagi.",
-                S.ditolakTotal, tostring(d.reason))
+        -- TOO_FAR itu keadaan yang BISA DIPERBAIKI, bukan alasan menyerah.
+        --
+        -- Ini sempat salah dan langsung kena di lapangan: penjaga di sini
+        -- mematikan script yang sedang memancing dengan tenang. Penyebab yang
+        -- paling mungkin, karakter terdorong keluar jangkauan lempar (batas
+        -- server 50 stud) -- meteor Eclipse, knockback, atau pemain lain --
+        -- lalu tiap lemparan dibalas TOO_FAR sampai pencacahnya penuh.
+        --
+        -- Jawaban yang benar untuk itu KEMBALI KE KOLAM, bukan berhenti. Jadi
+        -- tiap beberapa penolakan kita coba pulihkan posisi dulu; penjaga
+        -- menyerah baru menyala kalau pemulihan itu sendiri gagal berkali-kali.
+        if S.ditolakTotal % Config.TiapBerapaPulih == 0 and pulihKolam then
+            if not S.sedangPulih then
+                S.sedangPulih = true
+                task.spawn(function()
+                    local ok = pulihKolam()
+                    S.sedangPulih = false
+                    if ok then
+                        S.pulihGagal = 0
+                        S.ditolakTotal, S.ditolakBeruntun = 0, 0
+                    else
+                        S.pulihGagal = (S.pulihGagal or 0) + 1
+                    end
+                end)
+            end
+            return
+        end
+
+        if (S.pulihGagal or 0) >= Config.MaksPulihGagal
+           or S.ditolakTotal >= Config.MaksDitolakBeruntun then
+            S.sebabBerhenti = string.format(
+                "%d penolakan beruntun (%s), %d kali gagal kembali ke kolam",
+                S.ditolakTotal, tostring(d.reason), S.pulihGagal or 0)
+            -- warn, BUKAN catat: ini satu-satunya jejak kenapa panen berhenti,
+            -- dan `Senyap` default menyala -- membungkamnya berarti script mati
+            -- tanpa meninggalkan apa pun untuk dibaca.
+            warn("[MozeFish] BERHENTI: " .. S.sebabBerhenti)
             Config.Aktif = false
-            S.ditolakBeruntun, S.ditolakTotal = 0, 0
+            S.ditolakBeruntun, S.ditolakTotal, S.pulihGagal = 0, 0, 0
             if Gui.ada then pcall(Gui.cat) end
             return
         end
@@ -3499,9 +3543,13 @@ task.spawn(function()
             S.ulangTembak = 0
             S.gagalBeruntun = S.gagalBeruntun + 1
             if S.gagalBeruntun >= Config.MaksGagalBeruntun then
-                catat("BERHENTI: %d tembakan beruntun tidak dibalas dalam %.0f dtk. "
-                    .. "Server mungkin berubah — periksa dulu sebelum dinyalakan lagi.",
+                S.sebabBerhenti = string.format(
+                    "%d tembakan beruntun tidak dibalas dalam %.0f dtk",
                     S.gagalBeruntun, Config.BatasBalasan)
+                -- warn, bukan catat: `Senyap` default menyala, dan ini
+                -- satu-satunya jejak kenapa panen berhenti.
+                warn("[MozeFish] BERHENTI: " .. S.sebabBerhenti
+                    .. ". Server mungkin berubah — periksa dulu sebelum dinyalakan lagi.")
                 Config.Aktif = false
                 -- Tombolnya wajib ikut berubah. Panel yang menunjukkan "AKTIF"
                 -- padahal script sudah mematikan diri itu bohong ke pemakai,
@@ -3684,6 +3732,30 @@ local function keTitikKolam(namaKolam)
     return true
 end
 
+-- Kembali ke kolam terdekat lalu nyalakan mancing lagi.
+--
+-- Sengaja TIDAK memakai Config.JangkauanKolam untuk mencari: jangkauan itu
+-- batas MELEMPAR (45, batas server 50). Kalau karakter terlempar 200 stud, kita
+-- justru harus tetap menemukan kolamnya supaya bisa pulang -- membatasi
+-- pencarian ke 45 membuat pemulihan mustahil tepat saat ia paling dibutuhkan.
+local function cariKolamTerdekatBebas()
+    local hrp = PemainLokal.Character and PemainLokal.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil end
+    local nama, dekat = nil, math.huge
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("BasePart") and string.match(d.Name, "^PONDAREA%d+$") then
+            local l = d.CFrame:PointToObjectSpace(hrp.Position)
+            local h = d.Size / 2
+            local luar = Vector3.new(
+                math.max(math.abs(l.X) - h.X, 0),
+                math.max(math.abs(l.Y) - h.Y, 0),
+                math.max(math.abs(l.Z) - h.Z, 0))
+            if luar.Magnitude < dekat then nama, dekat = d.Name, luar.Magnitude end
+        end
+    end
+    return nama, dekat
+end
+
 local function pastikanMancing(namaKolam, maks)
     for percobaan = 1, (maks or 5) do
         -- Mulai percobaan ketiga, PINDAHKAN dulu. Dua percobaan pertama sengaja
@@ -3707,6 +3779,19 @@ local function pastikanMancing(namaKolam, maks)
     end
     catat("mancing tidak menyala ulang di %s sesudah 4 percobaan", tostring(namaKolam))
     return false
+end
+
+-- Isi deklarasi maju di atas. Dipanggil dari handler `Denied` saat penolakan
+-- menumpuk -- yang paling sering artinya karakter terdorong keluar jangkauan
+-- lempar, dan itu bisa diperbaiki sendiri dengan pulang ke kolam.
+pulihKolam = function()
+    local nama, jarak = cariKolamTerdekatBebas()
+    if not nama then return false end
+    catat("penolakan menumpuk, kembali ke %s (%d stud)", nama, math.floor(jarak or 0))
+    keTitikKolam(nama)
+    if not deteksiKolam() then return false end
+    if Gui.ada then pcall(Gui.catPond) end
+    return pastikanMancing(nama, 3)
 end
 
 -- =========================================================================
@@ -4280,6 +4365,10 @@ getgenv().MozeFishInfo = function()
         -- server (SusulanCancel) + satu bolak-balik. Ping saja jauh lebih kecil.
         ping        = S.ping,
         susulan     = S.susulan,
+        -- Diisi hanya saat script mematikan diri. Kalau panen berhenti dan
+        -- `aktif` false, INI yang menjelaskan kenapa.
+        sebabBerhenti = S.sebabBerhenti,
+        pulihGagal  = S.pulihGagal,
         tembak      = S.tembak,
         diterima    = S.diterima,
         siklus      = S.siklus,
