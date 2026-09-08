@@ -315,7 +315,13 @@ local RARITY_FEED = { "-", "Divine", "Supreme", "Celestial", "Ancient",
 -- tanpa satu pun pesan error.
 local function angkaRingkas(n)
     n = tonumber(n) or 0
-    local satuan = { { 1e12, "T" }, { 1e9, "B" }, { 1e6, "M" }, { 1e3, "K" } }
+    -- Tangga sampai De. Tanpa ini 1e21 tampil "1000000000.0T", dan itu tidak
+    -- bisa dibandingkan dengan angka yang ditulis game sendiri ("1Sx").
+    local satuan = {
+        { 1e33, "De" }, { 1e30, "No" }, { 1e27, "Oc" }, { 1e24, "Sp" },
+        { 1e21, "Sx" }, { 1e18, "Qi" }, { 1e15, "Qa" },
+        { 1e12, "T" }, { 1e9, "B" }, { 1e6, "M" }, { 1e3, "K" },
+    }
     for _, s in ipairs(satuan) do
         if n >= s[1] then return string.format("%.1f%s", n / s[1], s[2]) end
     end
@@ -785,6 +791,18 @@ local S = {
     pulihGagal   = 0,   -- berapa kali usaha kembali ke kolam gagal
     sedangPulih  = false,
     sebabBerhenti = nil, -- diisi saat script mematikan diri, dibaca dari panel/Info
+    -- Bahan hitungan ETA. cashLaju dilacak sebagai rata-rata BERGERAK: cash
+    -- masuk bergelombang (panen, jual, boost), jadi selisih dua bacaan mentah
+    -- terlalu berisik untuk ditampilkan.
+    cashLaju    = nil,  -- cash per detik
+    cashAkhir   = nil,
+    tCash       = nil,
+    rebirthNo   = nil,  -- nomor rebirth berikutnya
+    rebirthHrg  = nil,  -- biayanya
+    rebirthRank = nil,
+    upgNama     = nil,  -- label upgrade cash multiplier
+    upgLvl      = nil,
+    upgMaks     = nil,
     -- Berapa kali susulan reroll benar-benar perlu ditembak. NOL berarti server
     -- ini tidak memasang gerbang cancel; angka yang mendekati jumlah reroll
     -- berarti memasangnya. Ditampilkan supaya bisa dijawab dengan data, bukan
@@ -2578,7 +2596,8 @@ local function bangunGui()
     -- Di 212 px label terpaksa dipotong jadi "RAR: Anci" dan status seperti
     -- "nabung 24.6M>20.4M" tidak muat -- panel yang tidak terbaca sama saja
     -- dengan panel yang tidak ada.
-    local LEBAR, TINGGI, TINGGI_KECIL = 250, 358, 32
+    -- TINGGI dinaikkan dari 358 ke 396 untuk memberi tempat blok ETA di bawah.
+    local LEBAR, TINGGI, TINGGI_KECIL = 250, 396, 32
 
     local bingkai = Instance.new("Frame")
     bingkai.Name = "Panel"
@@ -2771,6 +2790,21 @@ local function bangunGui()
     bTabung.TextSize = 10
 
     local bSpot = pil("Spot", 14, 222, 290, 24)
+
+    -- Blok ETA. Dua baris, font Code supaya angkanya sejajar.
+    local lblEta = Instance.new("TextLabel")
+    lblEta.Name = "Eta"
+    lblEta.BackgroundTransparency = 1
+    lblEta.Position = UDim2.fromOffset(14, 320)
+    lblEta.Size = UDim2.new(1, -28, 0, 30)
+    lblEta.Font = Enum.Font.Code
+    lblEta.TextSize = 10
+    lblEta.TextXAlignment = Enum.TextXAlignment.Left
+    lblEta.TextYAlignment = Enum.TextYAlignment.Top
+    lblEta.TextColor3 = W.redup
+    lblEta.RichText = false
+    lblEta.Text = "measuring cash rate..."
+    lblEta.Parent = isi
     bSpot.TextSize = 11
 
     -- Warna mengikuti angkanya supaya bisa dinilai sekilas tanpa dibaca:
@@ -2839,6 +2873,49 @@ local function bangunGui()
             karakter or 0, tangkapPerMenit or 0, tolak or 0,
             S.ping and string.format("ping %.0fms · ", S.ping) or "",
             biaya and string.format("reroll %.0fms", biaya * 1000) or "--")
+    end
+
+    -- Lama, dalam bentuk yang bisa dibaca sekilas. Detik penuh tidak berguna
+    -- untuk angka berjam-jam, dan "9999 menit" sama tidak bergunanya.
+    local function lamanya(dtk)
+        if not dtk or dtk ~= dtk or dtk <= 0 then return "--" end
+        if dtk == math.huge then return "never" end
+        if dtk < 60 then return string.format("%.0fs", dtk) end
+        if dtk < 3600 then return string.format("%.0fm", dtk / 60) end
+        if dtk < 86400 then
+            return string.format("%.0fh %.0fm", math.floor(dtk / 3600), (dtk % 3600) / 60)
+        end
+        return string.format("%.1f days", dtk / 86400)
+    end
+
+    local function catEta()
+        local baris = {}
+        if S.cashLaju and S.cashLaju > 0 then
+            baris[#baris + 1] = "cash " .. angkaRingkas(S.cashLaju) .. "/s"
+        else
+            baris[#baris + 1] = "cash --/s"
+        end
+        if S.rebirthHrg and S.cashAkhir then
+            local sisa = S.rebirthHrg - S.cashAkhir
+            local eta = (S.cashLaju and S.cashLaju > 0) and (sisa / S.cashLaju) or nil
+            if sisa <= 0 then
+                baris[#baris + 1] = string.format("rebirth %s READY",
+                    tostring(S.rebirthNo or "?"))
+            else
+                baris[#baris + 1] = string.format("rebirth %s in %s",
+                    tostring(S.rebirthNo or "?"), lamanya(eta))
+            end
+        end
+        local b1 = table.concat(baris, "  ·  ")
+        -- Baris kedua sengaja PROGRES LEVEL, bukan ETA harga: remote
+        -- UpgradesStoreGetState cuma mengembalikan level, dan tidak ada rumus
+        -- harga di Constants. Menampilkan ETA di sini berarti mengarang angka.
+        local b2
+        if S.upgNama and S.upgLvl then
+            b2 = string.format("%s %d/%s", S.upgNama, S.upgLvl,
+                tostring(S.upgMaks or "?"))
+        end
+        lblEta.Text = b2 and (b1 .. "\n" .. b2) or b1
     end
 
     -- Tombol ini TIDAK memindahkan apa pun -- ia melapor. Yang ditampilkan
@@ -3081,6 +3158,7 @@ local function bangunGui()
     Gui.catLayar = catLayar
     Gui.catFeed = catFeed
     Gui.catSpot = catSpot
+    Gui.catEta = catEta
     Gui.statistik = rinci   -- dipertahankan: ada kode lama yang menyentuhnya
 end
 
@@ -3539,7 +3617,25 @@ task.spawn(function()
             -- untuk sebuah angka tampilan, dan Stats itu instance milik engine
             -- yang pembacaannya tidak gratis.
             S.ping = bacaPing()
-            if Gui.ada then pcall(function() Gui.catFps(S.fps) end) end
+            -- Laju cash. EWMA alfa 0,2: cash masuk bergelombang (panen, jual,
+            -- boost habis), dan selisih dua bacaan mentah terlalu berisik untuk
+            -- ditampilkan sebagai angka. Bacaan turun (habis belanja/rebirth)
+            -- SENGAJA dibuang, bukan dihitung sebagai laju negatif.
+            pcall(function()
+                local kini = tonumber(PemainLokal:GetAttribute("CashNumber"))
+                local jam = os.clock()
+                if kini and S.cashAkhir and S.tCash and jam > S.tCash then
+                    local d = (kini - S.cashAkhir) / (jam - S.tCash)
+                    if d >= 0 then
+                        S.cashLaju = S.cashLaju and (S.cashLaju + 0.2 * (d - S.cashLaju)) or d
+                    end
+                end
+                S.cashAkhir, S.tCash = kini, jam
+            end)
+            if Gui.ada then
+                pcall(function() Gui.catFps(S.fps) end)
+                pcall(function() Gui.catEta() end)
+            end
         end
 
         -- Tiap 5 detik, bukan tiap detik: menyapu ratusan descendant sesering
@@ -3611,6 +3707,48 @@ task.spawn(function()
                 S.diterima, S.tembak,
                 Config.Aktif and "" or " | NONAKTIF")
         end
+    end
+end)
+
+-- =========================================================================
+-- BAHAN ETA
+--
+-- Dua remote di bawah menahan thread (InvokeServer), jadi mereka TIDAK boleh
+-- ikut loop satu detik yang juga mengurus penjaga tembakan -- satu server yang
+-- lambat menjawab akan menahan penjaga itu juga. Jeda 30 detik sudah jauh lebih
+-- rapat daripada laju perubahan harga rebirth maupun level upgrade.
+task.spawn(function()
+    local Rebirth = ReplicatedStorage:FindFirstChild("RebirthGetState", true)
+    local Upgrade = ReplicatedStorage:FindFirstChild("UpgradesStoreGetState", true)
+    while S.hidup do
+        if Rebirth then
+            pcall(function()
+                local st = Rebirth:InvokeServer()
+                if type(st) == "table" then
+                    S.rebirthNo  = tonumber(st.nextRebirth)
+                    S.rebirthHrg = tonumber(st.nextCost)
+                    S.rebirthRank = st.nextRankName
+                end
+            end)
+        end
+        if Upgrade then
+            pcall(function()
+                local st = Upgrade:InvokeServer()
+                if type(st) == "table" and type(st.levels) == "table" then
+                    -- T1O1 = "Cash Multiplier": satu-satunya yang langsung
+                    -- menggerakkan ETA rebirth di baris atas.
+                    local C = require(ReplicatedStorage:WaitForChild("Constants"))
+                    local o = C.UpgradesStore and C.UpgradesStore.Offers
+                              and C.UpgradesStore.Offers.T1O1
+                    if o then
+                        S.upgNama = tostring(o.Label or "Cash Mult")
+                        S.upgLvl  = tonumber(st.levels.T1O1) or 0
+                        S.upgMaks = tonumber(o.MaxLevels)
+                    end
+                end
+            end)
+        end
+        task.wait(30)
     end
 end)
 
