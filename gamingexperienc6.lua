@@ -350,6 +350,18 @@ local Config = {
     TiapBerapaPulih = tonumber(U.TiapBerapaPulih) or 8,
     -- Baru menyerah kalau pemulihan posisinya sendiri yang gagal.
     MaksPulihGagal  = tonumber(U.MaksPulihGagal) or 4,
+    -- Berapa lama menahan posisi sesudah teleport, SEBELUM melempar.
+    --
+    -- Ini yang memunculkan "Move closer to the Pond!" sesudah pindah: server
+    -- masih memegang posisi LAMA kita, jadi lemparan pertama dibalas TOO_FAR
+    -- walau di layar kita sudah berdiri di tepi kolam.
+    --
+    -- Terukur 2026-09-07, jarak yang sama persis:
+    --   tembak 0,6 dtk sesudah teleport -> TOO_FAR, 0 dari 2
+    --   tembak 1,5 dtk sesudah teleport -> lolos,   3 dari 3
+    -- Nilai lama 1,2 ada di antara keduanya -- kadang lolos, kadang tidak, dan
+    -- itu persis gejalanya. 1,8 diambil supaya ada sisa untuk ping yang jelek.
+    JedaSetelahPindah = tonumber(U.JedaSetelahPindah) or 1.8,
 
     -- ==== TOLAK-ROLL ====
     -- Kunci fiturnya: event `Started` mengumumkan `waitSeconds` SEBELUM
@@ -496,7 +508,18 @@ local Config = {
     -- Batas level GLOBAL: karakter yang sudah mencapai angka ini tidak diberi
     -- makan lagi, di mode mana pun. 0 = tanpa batas. Mode "rata200" memakai 200
     -- kalau angka ini dibiarkan 0, supaya perilaku lamanya tetap.
-    FeedLevelMaks   = tonumber(U.FeedLevelMaks) or SIMPAN.FeedLevelMaks or 0,
+    -- SENGAJA TIDAK membaca dari berkas simpanan, dan tidak ikut disimpan.
+    --
+    -- Panel tidak punya kontrol untuk angka ini. Jadi begitu satu nilai masuk
+    -- ke berkas simpanan, TIDAK ADA cara membatalkannya dari dalam game --
+    -- terjadi sungguhan: berkas seorang pemakai berisi 300, feed berhenti tepat
+    -- di level 300, dan itu terbaca seperti bug yang tidak pernah ada.
+    --
+    -- Sekarang default-nya selalu 0 (tanpa batas, batas asli game
+    -- Leveling.MaxCharacterLevel = 1000). Kalau memang mau dibatasi, isi
+    -- eksplisit lewat getgenv().MozeFishConfig.FeedLevelMaks -- itu jalur yang
+    -- selalu bisa dicabut lagi.
+    FeedLevelMaks   = tonumber(U.FeedLevelMaks) or 0,
     -- Rarity MINIMAL yang boleh diberi makan, memakai nama resmi game
     -- (Ascended, Divine, Supreme, Celestial, Ancient, God, Omniscient,
     -- Exclusive). "" = semua rarity. Untuk "di atas Celestial", isi "Ancient".
@@ -662,7 +685,6 @@ local function tulisSimpanan()
             AutoSpot   = Config.AutoSpot,
             FeedJumlah = Config.FeedJumlah,
             FeedMulaiDari = Config.FeedMulaiDari,
-            FeedLevelMaks = Config.FeedLevelMaks,
             FeedRarityMin = Config.FeedRarityMin,
         }))
     end)
@@ -3726,8 +3748,9 @@ local function keTitikKolam(namaKolam)
     local hrp = PemainLokal.Character and PemainLokal.Character:FindFirstChild("HumanoidRootPart")
     if not hrp then return false end
     local lepas = tahanDi(CFrame.new(pijakan.Position + Vector3.new(0, 4, 0)))
-    -- Ditahan sebentar supaya posisinya sampai di server sebelum melempar.
-    task.wait(1.2)
+    -- Ditahan supaya posisinya sampai di server sebelum melempar -- lihat
+    -- angka ukurnya di Config.JedaSetelahPindah.
+    task.wait(Config.JedaSetelahPindah)
     lepas()
     return true
 end
@@ -4284,9 +4307,9 @@ local function spotSesi()
     local hrp = PemainLokal.Character and PemainLokal.Character:FindFirstChild("HumanoidRootPart")
     if not hrp then return end
     hrp.CFrame = CFrame.new(pijakan.Position + Vector3.new(0, 4, 0))
-    -- Ditunggu sebentar: menembak sebelum posisi kita sampai di server membuat
-    -- lemparan pertama ditolak, dan penjaga gagal-beruntun ikut terpicu.
-    task.wait(1.2)
+    -- Ditunggu: menembak sebelum posisi kita sampai di server membuat lemparan
+    -- pertama ditolak ("Move closer to the Pond!"), dan penjaga ikut terpicu.
+    task.wait(Config.JedaSetelahPindah)
     if pastikanMancing(nama) then
         Spot.pindah = Spot.pindah + 1
         Spot.status = "moved to " .. nama
